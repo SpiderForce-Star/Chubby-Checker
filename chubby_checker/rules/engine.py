@@ -8,6 +8,15 @@ severity-tagged findings. Calibrated on real Ascent jobs.
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 from chubby_checker.utils.length import lengths_match
+from chubby_checker.rules.accessory_rules import (
+    extract_closure_counts,
+    extract_rivet_count,
+    extract_trim_info,
+    extract_gutter_downspout,
+    check_closures_present,
+    check_rivets_for_trim,
+    check_gutter_downspout,
+)
 
 
 @dataclass
@@ -34,11 +43,61 @@ class DiscrepancyEngine:
         self._check_panel_and_accessories()
         self._check_thermal_block_ratio()
         self._check_clip_screw_ratio()
+        self._check_closures_trim_gutter()      # <-- NEW
         self._check_missing_categories()
         self._check_mark_by_mark()
         self._check_length_match()
         self._check_system_flags()
         return self.discrepancies
+
+    # ------------------------------------------------------------------
+    # Closures, Pop Rivets, Trim, Gutter, Downspout
+    # ------------------------------------------------------------------
+    def _check_closures_trim_gutter(self):
+        categories = self.shipper.get("categories", {})
+        raw_text = self.shipper.get("raw_text", "")  # optional
+
+        # Detect whether panels exist
+        panel_cats = [
+            c for c in categories
+            if any(k in c.lower() for k in [
+                "panel", "standing seam", "r-loc", "rloc", "pbr",
+                "7.2", "m-loc", "mloc", "pba", "roof sheet", "wall sheet",
+            ])
+        ]
+        has_panels = bool(panel_cats)
+        panel_count = 0
+        for c in panel_cats:
+            panel_count += sum(getattr(p, "quantity", 0) for p in categories.get(c, []))
+
+        # Closures
+        closure_counts = extract_closure_counts(categories, raw_text)
+        for f in check_closures_present(closure_counts, has_panels, panel_count):
+            self.discrepancies.append(Discrepancy(**f))
+
+        # Trim + Rivets
+        trim_info = extract_trim_info(categories)
+        rivet_count = extract_rivet_count(categories, raw_text)
+        for f in check_rivets_for_trim(rivet_count, trim_info["count"]):
+            self.discrepancies.append(Discrepancy(**f))
+
+        if trim_info["count"] > 0:
+            msg = f"Trim pieces detected: {trim_info['count']} (unique marks: {trim_info['unique_marks']})"
+            if trim_info.get("total_length_ft"):
+                msg += f", approx total length {trim_info['total_length_ft']} ft"
+            self.discrepancies.append(Discrepancy(
+                severity="INFO",
+                category="Trim",
+                message=msg,
+                actual=trim_info["count"],
+                rule="trim_present",
+            ))
+
+        # Gutter & Downspout
+        gd = extract_gutter_downspout(categories, raw_text)
+        has_roof = has_panels  # simplified; can be refined with drawings notes
+        for f in check_gutter_downspout(gd, has_roof_panels=has_roof):
+            self.discrepancies.append(Discrepancy(**f))
 
     # ------------------------------------------------------------------
     # Mark-by-mark quantity comparison
@@ -113,11 +172,9 @@ class DiscrepancyEngine:
             ))
 
     # ------------------------------------------------------------------
-    # Length comparison (new)
+    # Length comparison
     # ------------------------------------------------------------------
     def _check_length_match(self):
-        """For marks that exist on both sides, compare length_inches within tolerance."""
-        # Build mark → list of pieces for both sides
         drawings_pieces: Dict[str, list] = {}
         member_tables = self.drawings.get("member_tables", {})
         for pieces in member_tables.values():
@@ -138,17 +195,12 @@ class DiscrepancyEngine:
             if mark not in shipper_pieces:
                 continue
             s_list = shipper_pieces[mark]
-
-            # Compare the primary (first / most common) length
             d_len = next((p.length_inches for p in d_list if p.length_inches is not None), None)
             s_len = next((p.length_inches for p in s_list if p.length_inches is not None), None)
-
             if d_len is None or s_len is None:
                 continue
-
             checked += 1
             if not lengths_match(d_len, s_len, tolerance=0.25):
-                # Also keep original strings if available
                 d_str = next((p.length for p in d_list if p.length), f"{d_len}\"")
                 s_str = next((p.length for p in s_list if p.length), f"{s_len}\"")
                 diff = abs(d_len - s_len)
@@ -173,7 +225,6 @@ class DiscrepancyEngine:
     def _check_system_flags(self):
         has_crane_drawings = self.drawings.get("has_crane", False)
         has_mezz_drawings = self.drawings.get("has_mezzanine", False)
-
         shipper_text_cats = " ".join(self.shipper.get("categories", {}).keys()).upper()
 
         if has_crane_drawings and "RUNWAY" not in shipper_text_cats and "CRANE" not in shipper_text_cats:
@@ -193,19 +244,13 @@ class DiscrepancyEngine:
             ))
 
     # ------------------------------------------------------------------
-    # Panel / accessory rules
+    # Panel / accessory rules (Standing Seam)
     # ------------------------------------------------------------------
     def _check_panel_and_accessories(self):
         coverage = self.shipper.get("panel_coverage", {})
         accessories = self.shipper.get("ss_accessories", {})
 
         if not coverage:
-            self.discrepancies.append(Discrepancy(
-                severity="INFO",
-                category="Panel",
-                message="No standing seam panel coverage detected in shipper.",
-                rule="panel_coverage_detect"
-            ))
             return
 
         dominant = max(coverage.items(), key=lambda x: x[1])[0] if coverage else None
@@ -225,7 +270,7 @@ class DiscrepancyEngine:
             self.discrepancies.append(Discrepancy(
                 severity="INFO",
                 category="Panel",
-                message=f"18\" panels dominant. Clip density should be higher than 24\" system.",
+                message="18\" panels dominant. Clip density should be higher than 24\" system.",
                 actual=coverage,
                 rule="coverage_width"
             ))
@@ -254,10 +299,8 @@ class DiscrepancyEngine:
         accessories = self.shipper.get("ss_accessories", {})
         clips = accessories.get("sliding_clips", 0)
         blocks = accessories.get("thermal_blocks", 0)
-
         if clips == 0:
             return
-
         ratio = blocks / clips if clips else 0
         if ratio < 0.85:
             self.discrepancies.append(Discrepancy(
@@ -282,10 +325,8 @@ class DiscrepancyEngine:
         accessories = self.shipper.get("ss_accessories", {})
         clips = accessories.get("sliding_clips", 0)
         screws = accessories.get("clip_screws", 0)
-
         if clips == 0:
             return
-
         ratio = screws / clips if clips else 0
         if ratio < 0.9:
             self.discrepancies.append(Discrepancy(
