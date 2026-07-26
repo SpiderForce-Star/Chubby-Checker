@@ -1,193 +1,244 @@
 """
 Parser for Ascent Buildings Complete Shipper PDFs.
 
-Extracts structured data from multi-page categorized shippers using pdfplumber.
-Calibrated on real jobs: 25-13266, 25-13059, 25-13168 (PH1/PH3/PH4/PH5/PH6).
+Extracts:
+- Category weight summaries from the cover / index page
+- Piece-level data (mark, qty, description, length, weight, section)
+- Standing Seam accessories (clips, backup plates, thermal blocks, screws)
+
+Calibrated on real jobs: 25-13266, 25-13059, 25-13168 (PH1–PH6)
 """
 
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
 import re
 import pdfplumber
 from chubby_checker.models.piece import Piece
 
 
-@dataclass
-class ShipperSummary:
-    job_number: str = ""
-    phase: str = ""
-    total_weight: float = 0.0
-    category_weights: Dict[str, float] = field(default_factory=dict)
-
-
 class ShipperParser:
-    """Extract pieces, accessories, and panel data from Ascent Complete Shipper PDFs."""
-
     def __init__(self, pdf_path: str | Path):
         self.pdf_path = Path(pdf_path)
-        self.summary = ShipperSummary()
         self.categories: Dict[str, List[Piece]] = {}
+        self.summary_weights: Dict[str, float] = {}
         self.ss_accessories: Dict[str, int] = {
             "sliding_clips": 0,
             "backup_plates_24": 0,
             "backup_plates_18": 0,
             "thermal_blocks": 0,
-            "hi_eave_plates": 0,
             "clip_screws": 0,
-            "other": 0,
+            "hi_eave_plates": 0,
+            "hi_rake_supports": 0,
         }
-        self.panel_coverage: Dict[str, int] = {}  # e.g. {"24": 1224, "18": 6, "16": 0}
-        self.screws: Dict[str, int] = {}
+        self.raw_text_pages: List[str] = []
 
-    def parse(self) -> Dict[str, Any]:
-        """Main entry point. Returns full structured extraction."""
+    def parse(self) -> Dict[str, List[Piece]]:
+        """Main entry point. Parses the entire shipper PDF."""
         with pdfplumber.open(self.pdf_path) as pdf:
-            self._parse_cover(pdf.pages[0] if pdf.pages else None)
             for page in pdf.pages:
                 text = page.extract_text() or ""
+                self.raw_text_pages.append(text)
+
+                # Try structured table extraction first
                 tables = page.extract_tables() or []
+                self._process_tables(tables, text)
 
-                if "SS Accessories" in text or "SS Accessories" in (page.extract_text() or ""):
-                    self._parse_ss_accessories(tables, text)
-                elif "Standing Seam" in text and "Roof Sheet" in text:
-                    self._parse_standing_seam(tables, text)
-                elif "Screws_Fasteners" in text or "Screws" in text:
-                    self._parse_screws(tables, text)
-                elif any(cat in text for cat in ["Cold Formed Steel", "Fabricated Steel", "Hot Rolled"]):
-                    self._parse_structural_table(tables, text)
+                # Fallback / enrichment from raw text
+                self._extract_from_text(text)
 
-        return {
-            "summary": self.summary,
-            "categories": self.categories,
-            "ss_accessories": self.ss_accessories,
-            "panel_coverage": self.panel_coverage,
-            "screws": self.screws,
-        }
+        self._post_process_ss_accessories()
+        return self.categories
 
-    def _parse_cover(self, page) -> None:
-        if not page:
-            return
-        text = page.extract_text() or ""
-        # Job number patterns: 25-13168 or 25-13168 PH4
-        m = re.search(r"(25-\d{5})(?:\s*(PH\d+))?", text)
-        if m:
-            self.summary.job_number = m.group(1)
-            self.summary.phase = m.group(2) or ""
+    def _process_tables(self, tables: List[List[List[Any]]], page_text: str):
+        """Process pdfplumber tables looking for piece lists."""
+        for table in tables:
+            if not table or len(table) < 2:
+                continue
 
-        # Weight total
-        m = re.search(r"Wt Total[:\s]*([\d,]+\.?\d*)", text, re.IGNORECASE)
-        if m:
-            self.summary.total_weight = float(m.group(1).replace(",", ""))
+            header = [str(c or "").lower() for c in table[0]]
 
-        # Category weights from Shipping List Index
-        for line in text.splitlines():
-            if any(k in line for k in ["Cold Formed", "Standing Seam", "Fabricated", "Hot Rolled", "Screws", "Bolts", "Trim"]):
-                parts = re.findall(r"([\d,]+\.\d+)", line)
-                if parts:
-                    # Heuristic: last number is often the weight
+            # Detect typical Ascent shipper column patterns
+            has_qty = any("qnty" in h or "qty" in h or "quantity" in h for h in header)
+            has_mark = any("mark" in h for h in header)
+            has_desc = any("description" in h or "desc" in h for h in header)
+
+            if has_qty and has_mark:
+                self._parse_piece_table(table, header)
+
+    def _parse_piece_table(self, table: List[List[Any]], header: List[str]):
+        """Parse a standard piece-mark table."""
+        # Map column indexes
+        col_map = {}
+        for i, h in enumerate(header):
+            h = h.lower()
+            if "qnty" in h or "qty" in h or "quantity" in h:
+                col_map["qty"] = i
+            elif "mark" in h:
+                col_map["mark"] = i
+            elif "description" in h or "desc" in h:
+                col_map["desc"] = i
+            elif "part" in h:
+                col_map["part"] = i
+            elif "length" in h:
+                col_map["length"] = i
+            elif "weight" in h and "unit" not in h:
+                col_map["weight"] = i
+            elif "unit weight" in h:
+                col_map["unit_weight"] = i
+            elif "color" in h:
+                col_map["color"] = i
+
+        category = self._detect_category_from_header(header) or "Unknown"
+
+        for row in table[1:]:
+            if not row or len(row) < 2:
+                continue
+            try:
+                qty_str = str(row[col_map.get("qty", 0)] or "").strip()
+                if not qty_str or not re.match(r"^\d+", qty_str):
+                    continue
+                qty = int(re.match(r"(\d+)", qty_str).group(1))
+
+                mark = str(row[col_map.get("mark", 1)] or "").strip()
+                if not mark:
+                    continue
+
+                desc = str(row[col_map.get("desc", 2)] or "").strip()
+                length = str(row[col_map.get("length", -1)] or "").strip() if "length" in col_map else None
+                weight = None
+                if "weight" in col_map:
                     try:
-                        wt = float(parts[-1].replace(",", ""))
-                        key = line.split()[0] if line.split() else "unknown"
-                        self.summary.category_weights[key] = wt
+                        weight = float(str(row[col_map["weight"]] or "0").replace(",", ""))
                     except ValueError:
                         pass
 
-    def _parse_ss_accessories(self, tables: List, text: str) -> None:
-        """Extract clip, backup plate, thermal block counts from SS Accessories pages."""
-        for table in tables:
-            for row in table:
-                if not row or len(row) < 3:
-                    continue
-                row_str = " ".join(str(c or "") for c in row).lower()
-                qty = self._safe_int(row[0] if row else 0)
+                section = None
+                part = str(row[col_map.get("part", -1)] or "").strip() if "part" in col_map else None
+                if part:
+                    section = part
 
-                if "sliding clip" in row_str or "csp212" in row_str or "2\" high sliding" in row_str:
-                    self.ss_accessories["sliding_clips"] += qty
-                elif "24\" back" in row_str or "24\" backup" in row_str or "cl7760" in row_str:
-                    self.ss_accessories["backup_plates_24"] += qty
-                elif "18\" back" in row_str or "18\" backup" in row_str:
-                    self.ss_accessories["backup_plates_18"] += qty
-                elif "thermal block" in row_str or "cl575" in row_str:
-                    self.ss_accessories["thermal_blocks"] += qty
-                elif "hi-eave" in row_str or "hi eave" in row_str:
-                    self.ss_accessories["hi_eave_plates"] += qty
+                piece = Piece(
+                    mark=mark,
+                    description=desc,
+                    quantity=qty,
+                    length=length,
+                    weight=weight,
+                    section=section,
+                    category=category,
+                    source="shipper",
+                )
+                self.categories.setdefault(category, []).append(piece)
 
-    def _parse_standing_seam(self, tables: List, text: str) -> None:
-        """Detect panel coverage from part numbers (CS244=24\", CS184=18\", VS16=16\")."""
-        for table in tables:
-            for row in table:
-                if not row:
-                    continue
-                row_str = " ".join(str(c or "") for c in row).upper()
-                qty = self._safe_int(row[0] if row else 0)
+                # Capture key SS accessories by mark/description
+                self._capture_ss_accessory(mark, desc, qty)
 
-                if "CS244" in row_str or "24\"" in row_str:
-                    self.panel_coverage["24"] = self.panel_coverage.get("24", 0) + qty
-                elif "CS184" in row_str or "18\"" in row_str:
-                    self.panel_coverage["18"] = self.panel_coverage.get("18", 0) + qty
-                elif "VS16" in row_str or "16\"" in row_str or "CS16" in row_str:
-                    self.panel_coverage["16"] = self.panel_coverage.get("16", 0) + qty
+            except Exception:
+                continue
 
-    def _parse_screws(self, tables: List, text: str) -> None:
-        for table in tables:
-            for row in table:
-                if not row or len(row) < 2:
-                    continue
-                qty = self._safe_int(row[0])
-                desc = " ".join(str(c or "") for c in row[1:]).lower()
-                if "clip screw" in desc or "fss10" in desc or "panel clip" in desc:
-                    self.ss_accessories["clip_screws"] += qty
-                    self.screws["clip_screws"] = self.screws.get("clip_screws", 0) + qty
-                elif qty > 0:
-                    key = desc[:40] if desc else "unknown"
-                    self.screws[key] = self.screws.get(key, 0) + qty
+    def _detect_category_from_header(self, header: List[str]) -> Optional[str]:
+        header_str = " ".join(header).lower()
+        if "standing seam" in header_str:
+            return "Standing Seam"
+        if "ss accessories" in header_str or "ss accessory" in header_str:
+            return "SS Accessories"
+        if "cold formed" in header_str:
+            return "Cold Formed Steel"
+        if "hot rolled beam" in header_str:
+            return "Hot Rolled Beam"
+        if "fabricated" in header_str:
+            return "Fabricated Steel"
+        if "runway" in header_str:
+            return "Runway Beams"
+        if "bolt" in header_str:
+            return "Bolts_Nuts_Washers"
+        if "cable" in header_str or "rod" in header_str:
+            return "Cables and Rods"
+        return None
 
-    def _parse_structural_table(self, tables: List, text: str) -> None:
-        """Generic structural member extraction (Cold Formed, Fabricated, HR)."""
-        category = "Unknown"
-        if "Cold Formed" in text:
-            category = "Cold Formed Steel"
-        elif "Fabricated" in text:
-            category = "Fabricated Steel"
-        elif "Hot Rolled" in text:
-            category = "Hot Rolled"
+    def _extract_from_text(self, text: str):
+        """Fallback extraction using regex on page text (useful for cover summaries and SS accessories)."""
+        # Cover / index weight totals
+        weight_pattern = re.compile(
+            r"(Cold Formed Steel|Standard Panels|Trim|Sealant|Screws[_ ]Fasteners|"
+            r"Hot Rolled Beam|Hot Rolled Pipe[_ ]Tube|Fabricated Steel|Flange Braces|"
+            r"Loose Clips|Bolts[_ ]Nuts[_ ]Washers|Cables and Rods|Runway Beams|"
+            r"Structural Angle|Standing Seam|SS Accessories|Bar Joists)\s+([\d,]+\.?\d*)",
+            re.IGNORECASE,
+        )
+        for match in weight_pattern.finditer(text):
+            cat = match.group(1).replace("_", " ").strip()
+            try:
+                wt = float(match.group(2).replace(",", ""))
+                self.summary_weights[cat] = wt
+            except ValueError:
+                pass
 
-        if category not in self.categories:
-            self.categories[category] = []
+        # Standing Seam accessory patterns (very common in Ascent shippers)
+        self._extract_ss_from_text(text)
 
-        for table in tables:
-            for row in table:
-                if not row or len(row) < 4:
-                    continue
-                # Typical columns: Qty | Mark | Description | ... Length | Weight
-                try:
-                    qty = self._safe_int(row[0])
-                    mark = str(row[1] or "").strip()
-                    desc = str(row[2] or "").strip()
-                    if qty > 0 and mark:
-                        piece = Piece(
-                            mark=mark,
-                            description=desc,
-                            quantity=qty,
-                            category=category,
-                        )
-                        self.categories[category].append(piece)
-                except Exception:
-                    continue
+    def _extract_ss_from_text(self, text: str):
+        """Pull clip / plate / thermal block counts from free text."""
+        patterns = {
+            "sliding_clips": [
+                r"(\d+)\s+(?:CSP212|CS2124|2\" High Sliding Clip)",
+                r"(\d+)\s+.*Sliding Clip",
+            ],
+            "backup_plates_24": [
+                r"(\d+)\s+(?:CL7760|24\" Back Up Plate)",
+            ],
+            "backup_plates_18": [
+                r"(\d+)\s+(?:CL7769|18\" Back Up Plate)",
+            ],
+            "thermal_blocks": [
+                r"(\d+)\s+(?:CL575|1\" Thermal Block)",
+            ],
+            "clip_screws": [
+                r"(\d+)\s+.*Panel Clip Screw",
+                r"(\d+)\s+FSS10",
+            ],
+            "hi_eave_plates": [
+                r"(\d+)\s+(?:CL7616|Hi-Eave Plate)",
+            ],
+            "hi_rake_supports": [
+                r"(\d+)\s+(?:CL7720|Hi-Rake Support)",
+            ],
+        }
 
-    @staticmethod
-    def _safe_int(val) -> int:
-        try:
-            if val is None:
-                return 0
-            s = str(val).replace(",", "").strip()
-            return int(float(s)) if s else 0
-        except (ValueError, TypeError):
-            return 0
+        for key, pats in patterns.items():
+            for pat in pats:
+                m = re.search(pat, text, re.IGNORECASE)
+                if m:
+                    try:
+                        self.ss_accessories[key] = max(self.ss_accessories[key], int(m.group(1)))
+                    except ValueError:
+                        pass
+
+    def _capture_ss_accessory(self, mark: str, desc: str, qty: int):
+        """Update accessory counts when a piece row is recognized as an SS accessory."""
+        combined = f"{mark} {desc}".upper()
+        if "SLIDING CLIP" in combined or "CSP212" in combined or "CS2124" in combined:
+            self.ss_accessories["sliding_clips"] += qty
+        elif "24\" BACK" in combined or "CL7760" in combined:
+            self.ss_accessories["backup_plates_24"] += qty
+        elif "18\" BACK" in combined or "CL7769" in combined:
+            self.ss_accessories["backup_plates_18"] += qty
+        elif "THERMAL BLOCK" in combined or "CL575" in combined:
+            self.ss_accessories["thermal_blocks"] += qty
+        elif "HI-EAVE" in combined or "CL7616" in combined:
+            self.ss_accessories["hi_eave_plates"] += qty
+        elif "HI-RAKE" in combined or "CL7720" in combined:
+            self.ss_accessories["hi_rake_supports"] += qty
+
+    def _post_process_ss_accessories(self):
+        """Final cleanup of accessory counts."""
+        pass  # currently counts are accumulated directly
 
     def get_ss_accessories(self) -> Dict[str, int]:
-        return self.ss_accessories
+        return self.ss_accessories.copy()
 
-    def get_panel_coverage(self) -> Dict[str, int]:
-        return self.panel_coverage
+    def get_summary_weights(self) -> Dict[str, float]:
+        return self.summary_weights.copy()
+
+    def get_category_piece_count(self, category: str) -> int:
+        pieces = self.categories.get(category, [])
+        return sum(p.quantity for p in pieces)
