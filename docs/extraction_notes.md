@@ -1,31 +1,23 @@
-# PDF Extraction Notes
+# Extraction Notes – Chubby Checker
 
-## Ascent Complete Shipper Patterns
+## Standing Seam
+- CS244 → 24\" coverage
+- CS184 → 18\" coverage
+- VS16 / 16\" panels → higher clip density
+- Sliding clips (CSP212), Thermal blocks (CL575), Backup plates (CL7760 24\", CL7769 18\")
 
-### Cover / Index Page
-- Weight totals listed for each category (Cold Formed Steel, Hot Rolled Beam, Fabricated Steel, Standing Seam, SS Accessories, etc.)
-- Regex patterns capture these reliably.
+## Exposed Fastener Panels (Ascent / MBCI / Central States)
+| Profile | Coverage | System | Typical use |
+|---------|----------|--------|-------------|
+| R-Loc / RLOC / PBR | 36\" | Exposed | Roof + Wall |
+| 7.2 Panel | 36\" (or 28.8\") | Exposed | Roof + Wall |
+| M-Loc | ~36\" | Exposed | Commercial low-rib |
+| PBA | ~36\" | Exposed | Roof / Wall |
 
-### Piece Tables
-Typical columns:
-`Revision | Qnty | Mark | Description | Part | Color | Length | Unit Weight | Weight | Material ID`
+Fastener rules use approximate screws-per-support-line + support spacing (default 5' for purlins/girts). Engine flags large deviations when these panels appear but exposed-fastener screw quantities are missing or extremely low.
 
-pdfplumber `extract_tables()` works well on most category pages.
+## Multi-phase
+Shippers often arrive as PH1 (structure), PH3 (mezz), PH4 (panels), etc. Aggregator sums everything before comparison.
 
-### Standing Seam Accessories (critical for rules)
-Common marks seen in real jobs:
-- CSP212 / CS2124 → 2" High Sliding Clip
-- CL7760 → 24" Back Up Plate
-- CL7769 → 18" Back Up Plate
-- CL575 → 1" Thermal Block
-- CL7616 → Hi-Eave Plate
-- CL7720 → Hi-Rake Support
-- FSS10 → Panel Clip Screw (Insulation > 4")
-
-### Panel Coverage
-- CS244 → 24" coverage (most common)
-- CS184 → 18" coverage
-- VS16 / similar → 16" coverage (higher clip density)
-
-## Final Drawings
-Member Tables are often graphical. pdfplumber helps on cleaner pages; more complex elevations may need additional OCR or coordinate-based extraction later.
+## Length
+Both parsers normalize Ascent lengths (e.g. 29'-7 3/8\") to decimal inches for tolerance checks (±0.5\" warning, >6\" critical).
