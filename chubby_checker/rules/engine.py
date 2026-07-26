@@ -5,9 +5,9 @@ Compares extracted Shipper data vs Drawings data and produces
 severity-tagged findings. Calibrated on real Ascent jobs.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
-from chubby_checker.rules.panel_rules import COVERAGE_FACTOR, check_clip_ratio
+from chubby_checker.rules.panel_rules import COVERAGE_FACTOR
 
 
 @dataclass
@@ -35,11 +35,118 @@ class DiscrepancyEngine:
         self._check_thermal_block_ratio()
         self._check_clip_screw_ratio()
         self._check_missing_categories()
-        # Future: mark-by-mark member comparison once drawings parser is richer
+        self._check_mark_by_mark()
+        self._check_system_flags()
         return self.discrepancies
 
     # ------------------------------------------------------------------
-    # Panel coverage driven rules (core of the original request)
+    # Mark-by-mark quantity comparison (new)
+    # ------------------------------------------------------------------
+    def _check_mark_by_mark(self):
+        """Compare drawings mark quantities against shipper pieces."""
+        drawings_map = self.drawings.get("mark_quantity_map") or {}
+        if not drawings_map:
+            # Try to build from member_tables if present
+            member_tables = self.drawings.get("member_tables", {})
+            for pieces in member_tables.values():
+                for p in pieces:
+                    drawings_map[p.mark] = drawings_map.get(p.mark, 0) + p.quantity
+
+        if not drawings_map:
+            self.discrepancies.append(Discrepancy(
+                severity="INFO",
+                category="Comparison",
+                message="No Member Table marks extracted from drawings – skipping mark-by-mark check.",
+                rule="mark_by_mark"
+            ))
+            return
+
+        # Build shipper mark → qty map from all categories
+        shipper_map: Dict[str, int] = {}
+        categories = self.shipper.get("categories", {})
+        for pieces in categories.values():
+            for p in pieces:
+                shipper_map[p.mark] = shipper_map.get(p.mark, 0) + p.quantity
+
+        # Also include any top-level pieces if the parser stores them differently
+        # (future-proof)
+
+        missing = []
+        qty_mismatch = []
+        extra = []
+
+        for mark, expected_qty in drawings_map.items():
+            actual_qty = shipper_map.get(mark, 0)
+            if actual_qty == 0:
+                missing.append((mark, expected_qty))
+            elif actual_qty != expected_qty:
+                qty_mismatch.append((mark, expected_qty, actual_qty))
+
+        for mark, actual_qty in shipper_map.items():
+            if mark not in drawings_map:
+                extra.append((mark, actual_qty))
+
+        # Report findings
+        for mark, qty in missing[:30]:  # limit noise
+            self.discrepancies.append(Discrepancy(
+                severity="CRITICAL",
+                category="Missing Piece",
+                message=f"Mark {mark} appears in drawings (qty {qty}) but is missing from shipper.",
+                expected=qty,
+                actual=0,
+                mark=mark,
+                rule="mark_by_mark_missing"
+            ))
+
+        for mark, exp, act in qty_mismatch[:30]:
+            self.discrepancies.append(Discrepancy(
+                severity="WARNING",
+                category="Quantity Mismatch",
+                message=f"Mark {mark}: drawings show {exp}, shipper shows {act}.",
+                expected=exp,
+                actual=act,
+                mark=mark,
+                rule="mark_by_mark_qty"
+            ))
+
+        # Extras are often less critical (may be accessories or phased)
+        if extra:
+            self.discrepancies.append(Discrepancy(
+                severity="INFO",
+                category="Extra Pieces",
+                message=f"{len(extra)} mark(s) present in shipper but not found in drawings Member Tables (may be secondary/accessory/phased).",
+                actual=len(extra),
+                rule="mark_by_mark_extra"
+            ))
+
+    def _check_system_flags(self):
+        """Cross-check high-level system presence."""
+        has_crane_drawings = self.drawings.get("has_crane", False)
+        has_mezz_drawings = self.drawings.get("has_mezzanine", False)
+
+        # Simple presence checks in shipper categories / notes
+        shipper_text_cats = " ".join(self.shipper.get("categories", {}).keys()).upper()
+        accessories = self.shipper.get("ss_accessories", {})
+
+        if has_crane_drawings and "RUNWAY" not in shipper_text_cats and "CRANE" not in shipper_text_cats:
+            self.discrepancies.append(Discrepancy(
+                severity="WARNING",
+                category="Crane",
+                message="Drawings reference crane/runway system but no Runway/Crane category found in shipper.",
+                rule="system_crane"
+            ))
+
+        if has_mezz_drawings and "MEZZ" not in shipper_text_cats and "MEZZANINE" not in shipper_text_cats:
+            # Mezzanine often lives under Fabricated Steel or separate phase
+            self.discrepancies.append(Discrepancy(
+                severity="INFO",
+                category="Mezzanine",
+                message="Drawings show mezzanine. Confirm mezzanine framing is present in this or another shipper phase.",
+                rule="system_mezzanine"
+            ))
+
+    # ------------------------------------------------------------------
+    # Panel coverage driven rules
     # ------------------------------------------------------------------
     def _check_panel_and_accessories(self):
         coverage = self.shipper.get("panel_coverage", {})
@@ -54,7 +161,6 @@ class DiscrepancyEngine:
             ))
             return
 
-        # Determine dominant coverage
         dominant = max(coverage.items(), key=lambda x: x[1])[0] if coverage else None
         clips = accessories.get("sliding_clips", 0)
         plates_24 = accessories.get("backup_plates_24", 0)
@@ -77,8 +183,7 @@ class DiscrepancyEngine:
                 rule="coverage_width"
             ))
 
-        # Basic sanity on backup plates matching coverage
-        if dominant == "24" and plates_18 > plates_24 * 0.3:
+        if dominant == "24" and plates_18 > plates_24 * 0.3 and plates_24 > 0:
             self.discrepancies.append(Discrepancy(
                 severity="WARNING",
                 category="Accessories",
@@ -134,7 +239,6 @@ class DiscrepancyEngine:
         if clips == 0:
             return
 
-        # Typical: 1.0 – 2.0 screws per clip depending on insulation thickness / manufacturer
         ratio = screws / clips if clips else 0
         if ratio < 0.9:
             self.discrepancies.append(Discrepancy(
@@ -147,11 +251,9 @@ class DiscrepancyEngine:
             ))
 
     def _check_missing_categories(self):
-        """Flag if major expected categories are completely absent."""
         cats = self.shipper.get("categories", {})
         summary = self.shipper.get("summary")
         if summary and getattr(summary, "total_weight", 0) > 50000:
-            # Heavy structural job should have fabricated or cold formed
             if not cats.get("Fabricated Steel") and not cats.get("Cold Formed Steel"):
                 self.discrepancies.append(Discrepancy(
                     severity="WARNING",
@@ -170,7 +272,8 @@ class DiscrepancyEngine:
             if items:
                 lines.append(f"## {sev}")
                 for d in items:
-                    lines.append(f"- **{d.category}** ({d.rule}): {d.message}")
+                    prefix = f"[{d.mark}] " if d.mark else ""
+                    lines.append(f"- **{d.category}** ({d.rule}): {prefix}{d.message}")
                     if d.expected is not None:
                         lines.append(f"  - Expected: {d.expected} | Actual: {d.actual}")
                 lines.append("")
