@@ -7,8 +7,7 @@ severity-tagged findings. Calibrated on real Ascent jobs.
 
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
-from chubby_checker.rules.panel_rules import COVERAGE_FACTOR, check_clip_ratio
-from chubby_checker.models.piece import Piece
+from chubby_checker.utils.length import lengths_match
 
 
 @dataclass
@@ -25,17 +24,9 @@ class Discrepancy:
 class DiscrepancyEngine:
     """Core verification engine."""
 
-    def __init__(
-        self,
-        shipper_data: Dict[str, Any],
-        drawings_data: Optional[Dict[str, Any]] = None,
-        drawings_mark_qty: Optional[Dict[str, int]] = None,
-        shipper_mark_qty: Optional[Dict[str, int]] = None,
-    ):
+    def __init__(self, shipper_data: Dict[str, Any], drawings_data: Optional[Dict[str, Any]] = None):
         self.shipper = shipper_data or {}
         self.drawings = drawings_data or {}
-        self.drawings_mark_qty = drawings_mark_qty or {}
-        self.shipper_mark_qty = shipper_mark_qty or {}
         self.discrepancies: List[Discrepancy] = []
 
     def run(self) -> List[Discrepancy]:
@@ -44,107 +35,177 @@ class DiscrepancyEngine:
         self._check_thermal_block_ratio()
         self._check_clip_screw_ratio()
         self._check_missing_categories()
-        self._check_mark_by_mark()          # <-- new mark-by-mark comparison
+        self._check_mark_by_mark()
+        self._check_length_match()
+        self._check_system_flags()
         return self.discrepancies
 
     # ------------------------------------------------------------------
     # Mark-by-mark quantity comparison
     # ------------------------------------------------------------------
     def _check_mark_by_mark(self):
-        """
-        Compare every mark that appears on the drawings against the shipper.
-        Also report marks that exist only on the shipper.
-        """
-        if not self.drawings_mark_qty and not self.shipper_mark_qty:
-            # Try to build maps from piece lists if they were passed inside the data dicts
-            self.drawings_mark_qty = self._build_mark_map(self.drawings)
-            self.shipper_mark_qty = self._build_mark_map(self.shipper)
+        drawings_map = self.drawings.get("mark_quantity_map") or {}
+        if not drawings_map:
+            member_tables = self.drawings.get("member_tables", {})
+            for pieces in member_tables.values():
+                for p in pieces:
+                    drawings_map[p.mark] = drawings_map.get(p.mark, 0) + p.quantity
 
-        if not self.drawings_mark_qty:
+        if not drawings_map:
             self.discrepancies.append(Discrepancy(
                 severity="INFO",
-                category="Mark Comparison",
+                category="Comparison",
                 message="No Member Table marks extracted from drawings – skipping mark-by-mark check.",
                 rule="mark_by_mark"
             ))
             return
 
-        if not self.shipper_mark_qty:
+        shipper_map: Dict[str, int] = {}
+        categories = self.shipper.get("categories", {})
+        for pieces in categories.values():
+            for p in pieces:
+                shipper_map[p.mark] = shipper_map.get(p.mark, 0) + p.quantity
+
+        missing = []
+        qty_mismatch = []
+        extra = []
+
+        for mark, expected_qty in drawings_map.items():
+            actual_qty = shipper_map.get(mark, 0)
+            if actual_qty == 0:
+                missing.append((mark, expected_qty))
+            elif actual_qty != expected_qty:
+                qty_mismatch.append((mark, expected_qty, actual_qty))
+
+        for mark, actual_qty in shipper_map.items():
+            if mark not in drawings_map:
+                extra.append((mark, actual_qty))
+
+        for mark, qty in missing[:40]:
+            self.discrepancies.append(Discrepancy(
+                severity="CRITICAL",
+                category="Missing Piece",
+                message=f"Mark {mark} appears in drawings (qty {qty}) but is missing from shipper.",
+                expected=qty,
+                actual=0,
+                mark=mark,
+                rule="mark_by_mark_missing"
+            ))
+
+        for mark, exp, act in qty_mismatch[:40]:
             self.discrepancies.append(Discrepancy(
                 severity="WARNING",
-                category="Mark Comparison",
-                message="No piece marks extracted from shipper – cannot perform mark-by-mark comparison.",
-                rule="mark_by_mark"
+                category="Quantity Mismatch",
+                message=f"Mark {mark}: drawings show {exp}, shipper shows {act}.",
+                expected=exp,
+                actual=act,
+                mark=mark,
+                rule="mark_by_mark_qty"
             ))
-            return
 
-        # 1. Marks on drawings but missing or wrong qty in shipper
-        for mark, expected_qty in self.drawings_mark_qty.items():
-            actual_qty = self.shipper_mark_qty.get(mark)
-
-            if actual_qty is None:
-                self.discrepancies.append(Discrepancy(
-                    severity="CRITICAL",
-                    category="Missing Mark",
-                    message=f"Mark {mark} appears on drawings (qty {expected_qty}) but is missing from the shipper.",
-                    expected=expected_qty,
-                    actual=0,
-                    mark=mark,
-                    rule="mark_by_mark"
-                ))
-            elif actual_qty != expected_qty:
-                self.discrepancies.append(Discrepancy(
-                    severity="WARNING",
-                    category="Quantity Mismatch",
-                    message=f"Mark {mark}: drawings show {expected_qty}, shipper shows {actual_qty}.",
-                    expected=expected_qty,
-                    actual=actual_qty,
-                    mark=mark,
-                    rule="mark_by_mark"
-                ))
-
-        # 2. Marks that exist only in the shipper (possible extras or drawings extraction miss)
-        for mark, actual_qty in self.shipper_mark_qty.items():
-            if mark not in self.drawings_mark_qty:
-                self.discrepancies.append(Discrepancy(
-                    severity="INFO",
-                    category="Extra Mark",
-                    message=f"Mark {mark} (qty {actual_qty}) is in the shipper but was not found in drawings Member Tables.",
-                    expected=0,
-                    actual=actual_qty,
-                    mark=mark,
-                    rule="mark_by_mark"
-                ))
-
-    def _build_mark_map(self, data: Dict[str, Any]) -> Dict[str, int]:
-        """Build mark → total quantity from either a categories dict of Piece lists or a flat map."""
-        result: Dict[str, int] = {}
-
-        # Case 1: already a mark→qty map
-        if data and all(isinstance(v, int) for v in data.values()):
-            return dict(data)
-
-        # Case 2: categories → List[Piece]
-        categories = data.get("categories") or data.get("member_tables") or data
-        if isinstance(categories, dict):
-            for pieces in categories.values():
-                if isinstance(pieces, list):
-                    for p in pieces:
-                        if isinstance(p, Piece):
-                            result[p.mark] = result.get(p.mark, 0) + p.quantity
-                        elif isinstance(p, dict) and "mark" in p:
-                            result[p["mark"]] = result.get(p["mark"], 0) + p.get("quantity", 1)
-        return result
+        if extra:
+            self.discrepancies.append(Discrepancy(
+                severity="INFO",
+                category="Extra Pieces",
+                message=f"{len(extra)} mark(s) present in shipper but not found in drawings Member Tables (may be secondary/accessory/phased).",
+                actual=len(extra),
+                rule="mark_by_mark_extra"
+            ))
 
     # ------------------------------------------------------------------
-    # Panel coverage driven rules
+    # Length comparison (new)
+    # ------------------------------------------------------------------
+    def _check_length_match(self):
+        """For marks that exist on both sides, compare length_inches within tolerance."""
+        # Build mark → list of pieces for both sides
+        drawings_pieces: Dict[str, list] = {}
+        member_tables = self.drawings.get("member_tables", {})
+        for pieces in member_tables.values():
+            for p in pieces:
+                drawings_pieces.setdefault(p.mark, []).append(p)
+
+        shipper_pieces: Dict[str, list] = {}
+        categories = self.shipper.get("categories", {})
+        for pieces in categories.values():
+            for p in pieces:
+                shipper_pieces.setdefault(p.mark, []).append(p)
+
+        if not drawings_pieces or not shipper_pieces:
+            return
+
+        checked = 0
+        for mark, d_list in drawings_pieces.items():
+            if mark not in shipper_pieces:
+                continue
+            s_list = shipper_pieces[mark]
+
+            # Compare the primary (first / most common) length
+            d_len = next((p.length_inches for p in d_list if p.length_inches is not None), None)
+            s_len = next((p.length_inches for p in s_list if p.length_inches is not None), None)
+
+            if d_len is None or s_len is None:
+                continue
+
+            checked += 1
+            if not lengths_match(d_len, s_len, tolerance=0.25):
+                # Also keep original strings if available
+                d_str = next((p.length for p in d_list if p.length), f"{d_len}\"")
+                s_str = next((p.length for p in s_list if p.length), f"{s_len}\"")
+                diff = abs(d_len - s_len)
+                self.discrepancies.append(Discrepancy(
+                    severity="WARNING",
+                    category="Length Mismatch",
+                    message=f"Mark {mark}: length differs by {diff:.3f}\". Drawings: {d_str} | Shipper: {s_str}",
+                    expected=d_str,
+                    actual=s_str,
+                    mark=mark,
+                    rule="length_match"
+                ))
+
+        if checked == 0:
+            self.discrepancies.append(Discrepancy(
+                severity="INFO",
+                category="Length",
+                message="No comparable lengths found (one or both sides missing length_inches).",
+                rule="length_match"
+            ))
+
+    def _check_system_flags(self):
+        has_crane_drawings = self.drawings.get("has_crane", False)
+        has_mezz_drawings = self.drawings.get("has_mezzanine", False)
+
+        shipper_text_cats = " ".join(self.shipper.get("categories", {}).keys()).upper()
+
+        if has_crane_drawings and "RUNWAY" not in shipper_text_cats and "CRANE" not in shipper_text_cats:
+            self.discrepancies.append(Discrepancy(
+                severity="WARNING",
+                category="Crane",
+                message="Drawings reference crane/runway system but no Runway/Crane category found in shipper.",
+                rule="system_crane"
+            ))
+
+        if has_mezz_drawings and "MEZZ" not in shipper_text_cats and "MEZZANINE" not in shipper_text_cats:
+            self.discrepancies.append(Discrepancy(
+                severity="INFO",
+                category="Mezzanine",
+                message="Drawings show mezzanine. Confirm mezzanine framing is present in this or another shipper phase.",
+                rule="system_mezzanine"
+            ))
+
+    # ------------------------------------------------------------------
+    # Panel / accessory rules
     # ------------------------------------------------------------------
     def _check_panel_and_accessories(self):
         coverage = self.shipper.get("panel_coverage", {})
         accessories = self.shipper.get("ss_accessories", {})
 
         if not coverage:
-            # Not every shipper has standing seam – only warn if we expected it
+            self.discrepancies.append(Discrepancy(
+                severity="INFO",
+                category="Panel",
+                message="No standing seam panel coverage detected in shipper.",
+                rule="panel_coverage_detect"
+            ))
             return
 
         dominant = max(coverage.items(), key=lambda x: x[1])[0] if coverage else None
@@ -156,7 +217,7 @@ class DiscrepancyEngine:
             self.discrepancies.append(Discrepancy(
                 severity="INFO",
                 category="Panel",
-                message=f"VS16 / 16\" panels detected ({coverage.get('16', 0)} pcs). Expect ~1.5	imes clip density vs 24\" system.",
+                message=f"VS16 / 16\" panels detected ({coverage.get('16', 0)} pcs). Expect ~1.5× clip density vs 24\" system.",
                 actual=coverage,
                 rule="coverage_width"
             ))
@@ -169,7 +230,7 @@ class DiscrepancyEngine:
                 rule="coverage_width"
             ))
 
-        if dominant == "24" and plates_18 > plates_24 * 0.3 and plates_18 > 10:
+        if dominant == "24" and plates_18 > plates_24 * 0.3 and plates_24 > 0:
             self.discrepancies.append(Discrepancy(
                 severity="WARNING",
                 category="Accessories",
@@ -226,7 +287,7 @@ class DiscrepancyEngine:
             return
 
         ratio = screws / clips if clips else 0
-        if ratio < 0.9 and screws > 0:
+        if ratio < 0.9:
             self.discrepancies.append(Discrepancy(
                 severity="WARNING",
                 category="Fasteners",
@@ -258,9 +319,8 @@ class DiscrepancyEngine:
             if items:
                 lines.append(f"## {sev}")
                 for d in items:
-                    lines.append(f"- **{d.category}** ({d.rule}): {d.message}")
-                    if d.mark:
-                        lines.append(f"  - Mark: `{d.mark}`")
+                    prefix = f"[{d.mark}] " if d.mark else ""
+                    lines.append(f"- **{d.category}** ({d.rule}): {prefix}{d.message}")
                     if d.expected is not None:
                         lines.append(f"  - Expected: {d.expected} | Actual: {d.actual}")
                 lines.append("")
