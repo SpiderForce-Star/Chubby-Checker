@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Chubby-Checker CLI – Ascent Buildings Shipper Verifier"""
+"""Ascent Shipper Checker (codename Chubby Checker) – CLI"""
 
 import click
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional
 from datetime import datetime
 
+from chubby_checker.auth import require_access, PRODUCT_NAME, CODENAME
 from chubby_checker.parsers.shipper_parser import ShipperParser
 from chubby_checker.parsers.drawings_parser import DrawingsParser
 from chubby_checker.rules.engine import DiscrepancyEngine
@@ -60,16 +61,27 @@ def _try_multi_phase(shippers):
     default=False,
     help="Skip PDF report generation",
 )
+@click.option(
+    "--access-code",
+    default=None,
+    help="Access code (or set ASCENT_SHIPPER_CHECKER_CODE env var). Prompts if omitted.",
+)
 def main(
     shippers: Tuple[str, ...],
     drawings: str = None,
     job: str = None,
     output_dir: str = ".",
     no_pdf: bool = False,
+    access_code: Optional[str] = None,
 ):
-    """Run Chubby Checker and produce a PDF verification report."""
+    """Ascent Shipper Checker — verify Complete Shippers against Final Drawings."""
+
+    # ---- Access control (internal Ascent Buildings) ----
+    require_access(provided=access_code)
+
     console.print(Panel.fit(
-        "[bold green]Chubby-Checker[/bold green]\n"
+        f"[bold green]{PRODUCT_NAME}[/bold green]\n"
+        f"[dim]codename {CODENAME}[/dim]\n"
         "PEMB Shipper vs Drawings Verifier  •  PDF Report",
         border_style="green",
     ))
@@ -104,7 +116,6 @@ def main(
             for p in plist:
                 shipper_data["mark_qty"][p.mark] = shipper_data["mark_qty"].get(p.mark, 0) + p.quantity
 
-        # If additional shippers were passed but no multi-phase module, parse & merge simply
         for extra in shippers[1:]:
             console.print(f"   + merging {extra}")
             ep = ShipperParser(extra)
@@ -156,7 +167,6 @@ def main(
     engine = DiscrepancyEngine(shipper_data=shipper_data, drawings_data=drawings_data)
     findings = engine.run()
 
-    # Console summary
     critical = sum(1 for f in findings if getattr(f, "severity", "").upper() == "CRITICAL")
     warning = sum(1 for f in findings if getattr(f, "severity", "").upper() == "WARNING")
     info = sum(1 for f in findings if getattr(f, "severity", "").upper() == "INFO")

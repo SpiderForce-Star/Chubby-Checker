@@ -1,20 +1,56 @@
-# Chubby-Checker
+# Ascent Shipper Checker
 
-**Ascent Buildings BOM / Shipper vs Final Drawings Verification Tool**
+**Official name:** Ascent Shipper Checker  
+**Codename:** Chubby Checker
 
-Cross-checks Ascent Complete Shippers against Final Erection Drawings to catch quantity, length, weight, missing piece, clip/fastener, panel, framing, and accessory errors before release.
+Internal PEMB verification tool for **Ascent Buildings**.  
+Compares Complete Shipper PDFs against Final Drawings and produces a dated PDF report (`CC_Checked_{Job}_{Date}.pdf`).
+
+---
+
+## Access
+
+Licensed for internal Ascent Buildings use.
+
+**Access code:** `Twist`
+
+You can supply it three ways:
+
+```bash
+# 1. Interactive prompt (default)
+python -m chubby_checker --shipper shipper.pdf --drawings finals.pdf --job 25-13168
+
+# 2. CLI flag
+python -m chubby_checker --access-code Twist --shipper shipper.pdf ...
+
+# 3. Environment variable (good for scripts)
+export ASCENT_SHIPPER_CHECKER_CODE=Twist
+python -m chubby_checker --shipper shipper.pdf ...
+```
+
+> This is a simple internal gate, not cryptographic security. Anyone with the source can see the code.
+
+---
 
 ## Install
 
 ```bash
+git clone <ascent-buildings-repo-url>
+cd Chubby-Checker   # or Ascent-Shipper-Checker
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-# optional editable install:
+```
+
+Optional editable install:
+
+```bash
 pip install -e .
 ```
 
-## Run
+---
+
+## Usage
 
 ```bash
 python -m chubby_checker \
@@ -33,39 +69,36 @@ python -m chubby_checker \
   --job 25-13168
 ```
 
-PDF report filename: `CC_Checked_{JobNumber}_{YYYY-MM-DD}.pdf`
-
-Use `--no-pdf` for console-only output.
+---
 
 ## What it checks
 
-- Primary & secondary framing presence and mark inventory
-- Mark-by-mark quantity and length vs drawings
-- Standing Seam clips, thermal blocks, backup plates, clip screws
-- Exposed panels (R-Loc/PBR, 7.2, M-Loc, PBA)
-- Closures, trim, gutters, downspouts (+ geometry length formulas when L/W known)
-- Buy-outs excluded from missing-piece flags (insulation, IMP, joist/deck, doors, windows, louvers, skylights, vents, fans)
-- Weight roll-up vs index totals
+- Primary & secondary framing (mark-by-mark, lengths)
+- Standing seam accessories (clips, thermal blocks, backup plates, screws)
+- Exposed fastener panels (R-Loc/PBR, 7.2, M-Loc, PBA)
+- Closures, trim, gutters, downspouts
+- Weight roll-up
 - Crane / mezzanine system flags
-- Multi-phase shipper merge
+- Buy-outs correctly excluded (insulation, IMPs, New Millennium joist/deck, door/window units, etc.)
 
-## Project layout
+---
 
-```
-chubby_checker/
-  cli.py
-  parsers/     # shipper, drawings, multi-phase
-  rules/       # engine, framing, buyouts, accessories, weights, panels
-  report/      # PDF report
-  models/
-  utils/
-docs/
-requirements.txt
-pyproject.toml
+## Report
+
+Produces:
+
+```text
+CC_Checked_{JobNumber}_{YYYY-MM-DD}.pdf
 ```
 
-## Status
+- **NO ERRORS** banner when clean  
+- **ERRORS FOUND** with CRITICAL / WARNING detail when issues exist
 
-Production-ready for internal QC use. Calibrated on jobs 25-13266, 25-13059, 25-13168.
+---
 
-Built for Ascent Buildings internal quality control.
+## Transfer / licensing note
+
+This repository is intended to be transferred to an Ascent Buildings-controlled GitHub (or other) account.  
+Ascent Buildings may license and use the software internally under their own policies.
+
+Codename **Chubby Checker** remains in the codebase for continuity.
