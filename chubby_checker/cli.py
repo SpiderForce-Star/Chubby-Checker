@@ -10,6 +10,7 @@ from typing import Tuple, Optional
 from datetime import datetime
 
 from chubby_checker.auth import require_access, PRODUCT_NAME, CODENAME
+from chubby_checker.branding import find_logo, COMPANY_NAME
 from chubby_checker.parsers.shipper_parser import ShipperParser
 from chubby_checker.parsers.drawings_parser import DrawingsParser
 from chubby_checker.rules.engine import DiscrepancyEngine
@@ -19,7 +20,6 @@ console = Console()
 
 
 def _try_multi_phase(shippers):
-    """Use multi-phase aggregator when available and multiple files given."""
     if len(shippers) <= 1:
         return None
     try:
@@ -62,9 +62,21 @@ def _try_multi_phase(shippers):
     help="Skip PDF report generation",
 )
 @click.option(
+    "--no-watermark",
+    is_flag=True,
+    default=False,
+    help="Disable diagonal watermark / corner logo on PDF pages",
+)
+@click.option(
+    "--logo",
+    default=None,
+    type=click.Path(exists=True),
+    help="Override path to Ascent logo image for the PDF report",
+)
+@click.option(
     "--access-code",
     default=None,
-    help="Access code (or set ASCENT_SHIPPER_CHECKER_CODE env var). Prompts if omitted.",
+    help="Access code / license key (or set env). Prompts if omitted.",
 )
 def main(
     shippers: Tuple[str, ...],
@@ -72,27 +84,29 @@ def main(
     job: str = None,
     output_dir: str = ".",
     no_pdf: bool = False,
+    no_watermark: bool = False,
+    logo: Optional[str] = None,
     access_code: Optional[str] = None,
 ):
     """Ascent Shipper Checker — verify Complete Shippers against Final Drawings."""
 
-    # ---- Access control (internal Ascent Buildings) ----
     require_access(provided=access_code)
+
+    logo_path = Path(logo) if logo else find_logo()
 
     console.print(Panel.fit(
         f"[bold green]{PRODUCT_NAME}[/bold green]\n"
-        f"[dim]codename {CODENAME}[/dim]\n"
+        f"[dim]codename {CODENAME}  ·  {COMPANY_NAME}[/dim]\n"
         "PEMB Shipper vs Drawings Verifier  •  PDF Report",
         border_style="green",
     ))
+    if logo_path:
+        console.print(f"[dim]Logo: {logo_path}[/dim]")
 
     check_date = datetime.now()
     if job:
         console.print(f"[bold]Job:[/bold] {job}")
 
-    # ------------------------------------------------------------------
-    # 1. Parse Shipper(s)
-    # ------------------------------------------------------------------
     MultiCls = _try_multi_phase(shippers)
 
     if len(shippers) > 1 and MultiCls is not None:
@@ -135,9 +149,6 @@ def main(
 
     console.print(f"   Unique marks  : {len(shipper_data.get('mark_qty', {}))}")
 
-    # ------------------------------------------------------------------
-    # 2. Parse Drawings
-    # ------------------------------------------------------------------
     drawings_data = {}
     if drawings:
         console.print(f"\n[cyan]2. Parsing drawings:[/cyan] {drawings}")
@@ -160,9 +171,6 @@ def main(
     else:
         console.print("\n[dim]2. No drawings supplied.[/dim]")
 
-    # ------------------------------------------------------------------
-    # 3. Run engine
-    # ------------------------------------------------------------------
     console.print("\n[cyan]3. Running discrepancy engine…[/cyan]")
     engine = DiscrepancyEngine(shipper_data=shipper_data, drawings_data=drawings_data)
     findings = engine.run()
@@ -178,12 +186,8 @@ def main(
     table.add_row("[yellow]WARNING[/yellow]", str(warning))
     table.add_row("[cyan]INFO[/cyan]", str(info))
     console.print(table)
-
     console.print("\n" + engine.report())
 
-    # ------------------------------------------------------------------
-    # 4. PDF Report
-    # ------------------------------------------------------------------
     if not no_pdf:
         console.print("\n[cyan]4. Generating PDF report…[/cyan]")
         pdf_path = generate_pdf_report(
@@ -193,9 +197,10 @@ def main(
             check_date=check_date,
             shipper_files=list(shippers),
             drawings_file=drawings,
+            watermark=not no_watermark,
+            logo_path=logo_path,
         )
         console.print(f"   [bold green]Report saved:[/bold green] {pdf_path}")
-
         if critical or warning:
             console.print("[bold red]Status: ERRORS FOUND — review required before release.[/bold red]")
         else:
