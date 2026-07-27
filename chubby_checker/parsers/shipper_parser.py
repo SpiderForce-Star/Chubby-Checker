@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Any
 import re
 import pdfplumber
 from chubby_checker.models.piece import Piece
+from chubby_checker.utils.length import parse_length_to_inches
 
 
 class ShipperParser:
@@ -38,36 +39,24 @@ class ShipperParser:
             for page in pdf.pages:
                 text = page.extract_text() or ""
                 self.raw_text_pages.append(text)
-
-                # Try structured table extraction first
                 tables = page.extract_tables() or []
                 self._process_tables(tables, text)
-
-                # Fallback / enrichment from raw text
                 self._extract_from_text(text)
 
         self._post_process_ss_accessories()
         return self.categories
 
     def _process_tables(self, tables: List[List[List[Any]]], page_text: str):
-        """Process pdfplumber tables looking for piece lists."""
         for table in tables:
             if not table or len(table) < 2:
                 continue
-
             header = [str(c or "").lower() for c in table[0]]
-
-            # Detect typical Ascent shipper column patterns
             has_qty = any("qnty" in h or "qty" in h or "quantity" in h for h in header)
             has_mark = any("mark" in h for h in header)
-            has_desc = any("description" in h or "desc" in h for h in header)
-
             if has_qty and has_mark:
                 self._parse_piece_table(table, header)
 
     def _parse_piece_table(self, table: List[List[Any]], header: List[str]):
-        """Parse a standard piece-mark table."""
-        # Map column indexes
         col_map = {}
         for i, h in enumerate(header):
             h = h.lower()
@@ -105,6 +94,8 @@ class ShipperParser:
 
                 desc = str(row[col_map.get("desc", 2)] or "").strip()
                 length = str(row[col_map.get("length", -1)] or "").strip() if "length" in col_map else None
+                length_inches = parse_length_to_inches(length) if length else None
+
                 weight = None
                 if "weight" in col_map:
                     try:
@@ -122,14 +113,13 @@ class ShipperParser:
                     description=desc,
                     quantity=qty,
                     length=length,
+                    length_inches=length_inches,
                     weight=weight,
                     section=section,
                     category=category,
                     source="shipper",
                 )
                 self.categories.setdefault(category, []).append(piece)
-
-                # Capture key SS accessories by mark/description
                 self._capture_ss_accessory(mark, desc, qty)
 
             except Exception:
@@ -156,13 +146,11 @@ class ShipperParser:
         return None
 
     def _extract_from_text(self, text: str):
-        """Fallback extraction using regex on page text (useful for cover summaries and SS accessories)."""
-        # Cover / index weight totals
         weight_pattern = re.compile(
             r"(Cold Formed Steel|Standard Panels|Trim|Sealant|Screws[_ ]Fasteners|"
             r"Hot Rolled Beam|Hot Rolled Pipe[_ ]Tube|Fabricated Steel|Flange Braces|"
             r"Loose Clips|Bolts[_ ]Nuts[_ ]Washers|Cables and Rods|Runway Beams|"
-            r"Structural Angle|Standing Seam|SS Accessories|Bar Joists)\s+([\d,]+\.?\d*)",
+            r"Structural Angle|Standing Seam|SS Accessories|Bar Joists|Insulation)\s+([\d,]+\.?\d*)",
             re.IGNORECASE,
         )
         for match in weight_pattern.finditer(text):
@@ -172,12 +160,9 @@ class ShipperParser:
                 self.summary_weights[cat] = wt
             except ValueError:
                 pass
-
-        # Standing Seam accessory patterns (very common in Ascent shippers)
         self._extract_ss_from_text(text)
 
     def _extract_ss_from_text(self, text: str):
-        """Pull clip / plate / thermal block counts from free text."""
         patterns = {
             "sliding_clips": [
                 r"(\d+)\s+(?:CSP212|CS2124|2\" High Sliding Clip)",
@@ -203,7 +188,6 @@ class ShipperParser:
                 r"(\d+)\s+(?:CL7720|Hi-Rake Support)",
             ],
         }
-
         for key, pats in patterns.items():
             for pat in pats:
                 m = re.search(pat, text, re.IGNORECASE)
@@ -214,7 +198,6 @@ class ShipperParser:
                         pass
 
     def _capture_ss_accessory(self, mark: str, desc: str, qty: int):
-        """Update accessory counts when a piece row is recognized as an SS accessory."""
         combined = f"{mark} {desc}".upper()
         if "SLIDING CLIP" in combined or "CSP212" in combined or "CS2124" in combined:
             self.ss_accessories["sliding_clips"] += qty
@@ -230,8 +213,7 @@ class ShipperParser:
             self.ss_accessories["hi_rake_supports"] += qty
 
     def _post_process_ss_accessories(self):
-        """Final cleanup of accessory counts."""
-        pass  # currently counts are accumulated directly
+        pass
 
     def get_ss_accessories(self) -> Dict[str, int]:
         return self.ss_accessories.copy()
