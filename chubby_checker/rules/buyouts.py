@@ -1,222 +1,239 @@
 """
-Buy-out exclusion rules for Ascent Buildings jobs.
+Buy-out exclusion rules for Chubby-Checker (Ascent Buildings).
 
-=======================================================================
-ASCENT SCOPE (checked by Chubby-Checker)
-=======================================================================
-Ascent designs, fabricates, and ships:
+=====================================================================
+ASCENT SUPPLIES (must be present and checked when required by drawings)
+=====================================================================
   • Primary / main framing   (RF, PF, MF, columns, rafters, endwalls)
-  • Secondary framing        (purlins, girts, eave struts, flange braces, sag rods)
+  • Secondary framing        (purlins, girts, eave struts, flange braces)
   • Sheeting                 (standing seam + exposed fastener panels)
-  • Trim, gutters, downspouts, closures, fasteners
-  • Crane runway beams & braces (when in contract — not the rail itself)
+  • Trim                     (eave, rake, corner, base, gutter, downspout, etc.)
+  • Related accessories      (clips, thermal blocks, screws, bolts, closures)
+  • Crane runway SUPPORTS    (beams & braces – NOT the rail itself)
   • Mezzanine framing        (when Ascent-supplied)
 
-Framed openings (door jambs, headers, sills, trimmers) are typically
-Ascent cold-formed steel and SHOULD be checked.
-
-=======================================================================
-ALWAYS BUY-OUTS (do not flag as missing)
-=======================================================================
-These items are supplied by others. Chubby-Checker must:
-  1. Never raise CRITICAL "missing piece" errors for them.
-  2. Expect Insulation weight = 0.00 on the shipper.
-  3. Warn only if a buy-out category appears with unexpected quantity/weight
-     (possible data-entry error on the shipper).
-
-Buy-out list (exact):
-  • Insulation (any type — blanket, Skyliner, bay, faced/unfaced)
-  • IMPs — Insulated Metal Panels (Kingspan, AWIP, Nucor, etc.)
-  • Joist & Deck supplied by New Millennium Building Systems
-        ("framing by others" — joists themselves are buy-out;
-         any Ascent support steel around them is still checked)
-  • Walk / personnel / man doors          (the door unit)
-  • Overhead / roll-up / sectional doors  (the door unit)
-  • Windows
-  • Louvers
+=====================================================================
+ALWAYS BUY-OUTS (exclude from missing-piece checks; expect zero/near-zero weight)
+=====================================================================
+  • Insulation               (blanket, Skyliner, bay insulation, etc.)
+                             → Weight on shipper should be 0.00
+  • IMPs                     (Insulated Metal Panels – Kingspan, AWIP, Nucor…)
+  • Joists & Deck            (New Millennium Building Systems)
+                             → Framing by others; interfaces with Ascent steel
+  • Walk / personnel doors   (door UNIT only – framed opening may be Ascent CFS)
+  • Overhead / roll-up doors (door UNIT only)
+  • Windows                  (unit only)
+  • Louvers                  (unit only)
   • Skylights
-  • Roof vents & wall vents
-  • Fans (exhaust, supply, etc.)
+  • Roof & wall vents
+  • Fans                     (exhaust / supply)
 
-=======================================================================
+Important distinctions
+----------------------
+- Framed openings, jambs, headers, and trimmers for doors/windows are often
+  Ascent cold-formed and SHOULD be checked.
+- The door/window/louver UNIT itself is a buy-out.
+- Joist seats or connections on Ascent beams are Ascent; the joists are not.
 """
 
-from typing import Dict, List, Set, Any, Optional
+from typing import Dict, List, Set, Any
 
 # ---------------------------------------------------------------------------
-# Keyword lists (case-insensitive matching)
+# Keyword groups (order = specificity preference)
 # ---------------------------------------------------------------------------
 
+# Insulation – always buy-out, weight expected = 0
 INSULATION_KEYWORDS = [
-    "insulation", "skyliner", "bay insulation",
-    "faced insulation", "unfaced insulation",
-    "thermal insulation", "blanket insulation",
-    "vinyl faced", "scrim",
+    "insulation",
+    "skyliner",
+    "bay insulation",
+    "faced insulation",
+    "unfaced insulation",
+    "thermal insulation",
+    "blanket insulation",
+    "vinyl faced",
+    "fiberglass blanket",
 ]
 
+# Insulated Metal Panels – always buy-out
 IMP_KEYWORDS = [
-    "imp", "insulated metal panel", "insulated panel",
-    "kingspan", "awip", "all weather insulated",
-    "nucor panel", "nucor insulated",
+    "imp",
+    "insulated metal panel",
+    "insulated panel",
+    "kingspan",
+    "awip",
+    "all weather insulated",
+    "nucor panel",
+    "metl-span",
+    "metlspan",
 ]
 
+# Joist & Deck – New Millennium (framing by others)
 JOIST_DECK_KEYWORDS = [
-    "joist", "bar joist", "steel joist", "open web joist",
-    "new millennium", "newmillennium",
-    "metal deck", "roof deck", "floor deck", "composite deck",
-    # bare "deck" is risky; keep it only with context in is_buyout_text
+    "bar joist",
+    "steel joist",
+    "joist",
+    "new millennium",
+    "roof deck",
+    "floor deck",
+    "metal deck",
+    "b-deck",
+    "n-deck",
+    "deck",
 ]
 
-DOOR_UNIT_KEYWORDS = [
-    "walk door", "man door", "personnel door",
-    "overhead door", "roll-up", "rollup", "rolling door",
-    "sectional door", "oh door",
+# Door / window / louver UNITS (not the framed opening)
+DOOR_WINDOW_KEYWORDS = [
+    "walk door",
+    "man door",
+    "personnel door",
+    "hollow metal door",
+    "overhead door",
+    "roll-up door",
+    "rollup door",
+    "rolling door",
+    "sectional door",
+    "oh door",
+    "window",
+    "louver",
+    "louvre",
 ]
 
-OPENING_UNIT_KEYWORDS = [
-    "window", "louver", "louvre",
-    "skylight", "sky light",
-    "roof vent", "wall vent", "ridge vent", "exhaust vent",
-    "exhaust fan", "supply fan", "power fan", "fan unit",
+# Skylights, vents, fans
+SKYLIGHT_VENT_FAN_KEYWORDS = [
+    "skylight",
+    "sky light",
+    "roof vent",
+    "wall vent",
+    "ridge vent",
+    "turbine vent",
+    "gravity vent",
+    "exhaust fan",
+    "supply fan",
+    "wall fan",
+    "roof fan",
 ]
 
-# Combined list used by the generic matcher
+# Combined flat list for simple scans
 BUYOUT_KEYWORDS: List[str] = (
     INSULATION_KEYWORDS
     + IMP_KEYWORDS
     + JOIST_DECK_KEYWORDS
-    + DOOR_UNIT_KEYWORDS
-    + OPENING_UNIT_KEYWORDS
-    + ["fan"]  # broad fan catch; refined below
+    + DOOR_WINDOW_KEYWORDS
+    + SKYLIGHT_VENT_FAN_KEYWORDS
 )
 
-# Category names that appear on Ascent Shipping List Index / Load Out
+# Exact category names that appear on Ascent Shipping List Index
 BUYOUT_CATEGORIES: Set[str] = {
     "insulation",
     "bar joists",
     "joists",
-    "joist",
     "deck",
     "metal deck",
     "imp",
-    "imps",
     "insulated panels",
     "insulated metal panels",
 }
 
 
+def _normalize(text: str) -> str:
+    return (text or "").lower().strip()
+
+
 def is_buyout_text(text: str) -> bool:
     """
     Return True if the text clearly indicates a buy-out item.
-
-    Notes on ambiguity:
-    - "Deck" alone can mean mezzanine decking support or buy-out metal deck.
-      We treat clear "metal deck / roof deck / floor deck / New Millennium"
-      as buy-out; bare structural marks stay in scope.
-    - "Fan" alone is broad; prefer "exhaust fan", "supply fan", etc.
-    - Framed opening steel (jamb, header, sill) is NOT a buy-out.
+    Uses whole-phrase preference to reduce false positives.
     """
-    if not text:
+    t = _normalize(text)
+    if not t:
         return False
-    t = text.lower().strip()
-
-    # Strong matches first
-    for k in (INSULATION_KEYWORDS + IMP_KEYWORDS + DOOR_UNIT_KEYWORDS + OPENING_UNIT_KEYWORDS):
-        if k in t:
-            return True
-
-    # Joist / deck – require clearer context
-    for k in JOIST_DECK_KEYWORDS:
-        if k in t:
-            return True
-
-    # Bare "fan" only if it looks like equipment, not a mark fragment
-    if "fan" in t and any(w in t for w in ["exhaust", "supply", "roof", "wall", "unit", "power"]):
-        return True
-
-    return False
+    return any(k in t for k in BUYOUT_KEYWORDS)
 
 
 def is_buyout_category(category: str) -> bool:
-    """Return True if the shipper category name itself is a buy-out."""
-    if not category:
+    """Return True if the shipper category itself is a known buy-out."""
+    c = _normalize(category)
+    if not c:
         return False
-    c = category.lower().strip()
     if c in BUYOUT_CATEGORIES:
         return True
     return is_buyout_text(c)
 
 
-def is_insulation_category(category: str) -> bool:
-    """Special case: insulation must show 0.00 weight."""
-    if not category:
-        return False
-    c = category.lower()
-    return any(k in c for k in INSULATION_KEYWORDS) or c == "insulation"
+def is_insulation(text: str) -> bool:
+    t = _normalize(text)
+    return any(k in t for k in INSULATION_KEYWORDS)
+
+
+def is_joist_or_deck(text: str) -> bool:
+    t = _normalize(text)
+    return any(k in t for k in JOIST_DECK_KEYWORDS)
+
+
+def is_imp(text: str) -> bool:
+    t = _normalize(text)
+    return any(k in t for k in IMP_KEYWORDS)
 
 
 def filter_buyouts_from_marks(mark_map: Dict[str, int]) -> Dict[str, int]:
     """
-    Remove marks that look like buy-outs so they never generate
-    CRITICAL missing-piece errors.
+    Remove marks that look like buy-outs so they do not generate
+    CRITICAL missing-piece errors against drawings.
     """
     return {m: q for m, q in mark_map.items() if not is_buyout_text(m)}
 
 
-def check_unexpected_buyouts(
-    shipper_categories: Dict[str, Any],
-    summary_weights: Optional[Dict[str, float]] = None,
-) -> List[Dict[str, Any]]:
+def check_unexpected_buyouts(shipper_categories: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Flag two conditions:
-      1. A known buy-out category appears with quantity > 0 (data error?)
-      2. Insulation appears with weight != 0
+    Flag when a known buy-out category appears with quantity or weight
+    in an Ascent shipper (possible mis-classification or double-supply).
+
+    Returns list of finding dicts compatible with DiscrepancyEngine.
     """
     findings: List[Dict[str, Any]] = []
-    summary_weights = summary_weights or {}
 
     for cat, pieces in (shipper_categories or {}).items():
-        total_qty = sum(getattr(p, "quantity", 0) for p in (pieces or []))
+        if not is_buyout_category(cat):
+            continue
 
-        if is_buyout_category(cat) and total_qty > 0:
-            findings.append({
-                "severity": "WARNING",
-                "category": cat,
-                "quantity": total_qty,
-                "message": (
-                    f"Category '{cat}' is a standard Ascent buy-out but appears "
-                    f"in the shipper with quantity {total_qty}. Confirm this is intentional."
-                ),
-            })
+        total_qty = sum(getattr(p, "quantity", 0) or 0 for p in pieces)
+        if total_qty <= 0:
+            continue
 
-        # Insulation weight must be 0.00
-        if is_insulation_category(cat):
-            reported = None
-            for k, v in summary_weights.items():
-                if "insul" in k.lower():
-                    reported = v
-                    break
-            if reported is not None and abs(reported) > 0.01:
-                findings.append({
-                    "severity": "WARNING",
-                    "category": cat,
-                    "message": (
-                        f"Insulation weight is {reported} lbs. "
-                        f"Ascent policy expects insulation weight = 0.00 (buy-out)."
-                    ),
-                    "expected": 0.0,
-                    "actual": reported,
-                })
+        # Tailor message by type
+        if is_joist_or_deck(cat):
+            msg = (
+                f"Category '{cat}' (qty {total_qty}) appears in the Ascent shipper. "
+                f"Joists & Deck are always buy-outs from New Millennium Building Systems. "
+                f"Confirm Ascent is not supplying this material."
+            )
+            severity = "WARNING"
+        elif is_insulation(cat):
+            msg = (
+                f"Category '{cat}' (qty {total_qty}) appears in the shipper. "
+                f"Insulation is a buy-out and normally carries 0.00 weight."
+            )
+            severity = "INFO"
+        elif is_imp(cat):
+            msg = (
+                f"Category '{cat}' (qty {total_qty}) appears in the shipper. "
+                f"IMPs (Kingspan / AWIP / Nucor etc.) are buy-outs."
+            )
+            severity = "WARNING"
+        else:
+            msg = (
+                f"Category '{cat}' (qty {total_qty}) is a standard Ascent buy-out "
+                f"but appears in the shipper. Confirm classification."
+            )
+            severity = "INFO"
+
+        findings.append({
+            "severity": severity,
+            "category": "Buy-out",
+            "message": msg,
+            "actual": total_qty,
+            "rule": "buyout_unexpected",
+        })
 
     return findings
-
-
-def buyout_policy_statement() -> str:
-    """Short policy text for reports and INFO findings."""
-    return (
-        "Ascent supplies primary framing, secondary framing, sheeting, and trim. "
-        "Always buy-outs (excluded from missing-piece checks; insulation weight expected 0.00): "
-        "insulation, IMPs, joist/deck (New Millennium), walk doors, overhead/roll-up doors, "
-        "windows, louvers, skylights, vents, and fans. "
-        "Framed-opening steel (jambs/headers) remains in Ascent scope."
-    )
