@@ -7,30 +7,21 @@ from rich.panel import Panel
 from rich.table import Table
 from pathlib import Path
 from typing import Tuple, Optional
-from datetime import datetime
 
 from chubby_checker.auth import require_access, PRODUCT_NAME, CODENAME
 from chubby_checker.branding import find_logo, COMPANY_NAME
-from chubby_checker.parsers.shipper_parser import ShipperParser
-from chubby_checker.parsers.drawings_parser import DrawingsParser
-from chubby_checker.rules.engine import DiscrepancyEngine
-from chubby_checker.report.pdf_report import generate_pdf_report
+from chubby_checker.automation import run_job, extract_job_number
+from chubby_checker.errors import (
+    ChubbyCheckerError,
+    MissingFileError,
+    MissingDirectoryError,
+    EmptyInputError,
+    require_shippers,
+    optional_pdf,
+    format_missing_help,
+)
 
 console = Console()
-
-
-def _try_multi_phase(shippers):
-    if len(shippers) <= 1:
-        return None
-    try:
-        from chubby_checker.parsers.multi_phase import MultiPhaseShipper
-        return MultiPhaseShipper
-    except ImportError:
-        try:
-            from chubby_checker.parsers.multi_shipper import MultiShipperAggregator
-            return MultiShipperAggregator
-        except ImportError:
-            return None
 
 
 @click.command()
@@ -39,27 +30,28 @@ def _try_multi_phase(shippers):
     "shippers",
     multiple=True,
     required=True,
-    type=click.Path(exists=True),
+    type=click.Path(),  # validate ourselves for clearer errors
     help="Path to Complete Shipper PDF (repeat for multi-phase jobs)",
 )
 @click.option(
     "--drawings",
     required=False,
-    type=click.Path(exists=True),
+    default=None,
+    type=click.Path(),
     help="Path to Final Drawings PDF",
 )
-@click.option("--job", default=None, help="Job number (used in report filename)")
+@click.option("--job", default=None, help="Job number (auto-detected from filenames if omitted)")
 @click.option(
     "--output-dir",
-    default=".",
+    default="./reports",
     type=click.Path(),
-    help="Directory for the PDF report (default: current directory)",
+    help="Directory for the PDF report (default: ./reports)",
 )
 @click.option(
     "--no-pdf",
     is_flag=True,
     default=False,
-    help="Skip PDF report generation",
+    help="Skip PDF report generation (not recommended)",
 )
 @click.option(
     "--no-watermark",
@@ -70,7 +62,7 @@ def _try_multi_phase(shippers):
 @click.option(
     "--logo",
     default=None,
-    type=click.Path(exists=True),
+    type=click.Path(),
     help="Override path to Ascent logo image for the PDF report",
 )
 @click.option(
@@ -80,9 +72,9 @@ def _try_multi_phase(shippers):
 )
 def main(
     shippers: Tuple[str, ...],
-    drawings: str = None,
-    job: str = None,
-    output_dir: str = ".",
+    drawings: Optional[str] = None,
+    job: Optional[str] = None,
+    output_dir: str = "./reports",
     no_pdf: bool = False,
     no_watermark: bool = False,
     logo: Optional[str] = None,
@@ -92,121 +84,107 @@ def main(
 
     require_access(provided=access_code)
 
-    logo_path = Path(logo) if logo else find_logo()
-
     console.print(Panel.fit(
         f"[bold green]{PRODUCT_NAME}[/bold green]\n"
         f"[dim]codename {CODENAME}  ·  {COMPANY_NAME}[/dim]\n"
-        "PEMB Shipper vs Drawings Verifier  •  PDF Report",
+        "PEMB Shipper vs Drawings Verifier  •  Automated PDF Report",
         border_style="green",
     ))
+
+    # ---- Validate inputs early with clear messages ----
+    try:
+        shipper_paths = require_shippers(shippers)
+    except (MissingFileError, EmptyInputError, ChubbyCheckerError) as exc:
+        console.print(f"[bold red]Missing shipper file(s)[/bold red]")
+        console.print(f"[red]{exc}[/red]")
+        console.print(format_missing_help("shipper", shippers[0] if shippers else ""))
+        raise SystemExit(1)
+
+    try:
+        drawings_path = optional_pdf(drawings, role="drawings PDF") if drawings else None
+    except (MissingFileError, ChubbyCheckerError) as exc:
+        console.print(f"[bold red]Missing drawings file[/bold red]")
+        console.print(f"[red]{exc}[/red]")
+        console.print(format_missing_help("drawings", drawings or ""))
+        raise SystemExit(1)
+
+    logo_path = None
+    if logo:
+        lp = Path(logo).expanduser()
+        if not lp.is_file():
+            console.print(f"[bold red]Missing logo file[/bold red]: {lp}")
+            console.print(format_missing_help("logo", lp))
+            raise SystemExit(1)
+        logo_path = lp.resolve()
+    else:
+        logo_path = find_logo()
+
     if logo_path:
         console.print(f"[dim]Logo: {logo_path}[/dim]")
-
-    check_date = datetime.now()
-    if job:
-        console.print(f"[bold]Job:[/bold] {job}")
-
-    MultiCls = _try_multi_phase(shippers)
-
-    if len(shippers) > 1 and MultiCls is not None:
-        console.print(f"\n[cyan]1. Parsing {len(shippers)} phase shippers…[/cyan]")
-        aggregator = MultiCls(list(shippers))
-        shipper_data = aggregator.parse() if hasattr(aggregator, "parse") else {}
-        if not shipper_data and hasattr(aggregator, "as_shipper_data"):
-            shipper_data = aggregator.as_shipper_data()
     else:
-        console.print(f"\n[cyan]1. Parsing shipper:[/cyan] {shippers[0]}")
-        parser = ShipperParser(shippers[0])
-        pieces = parser.parse()
-        shipper_data = {
-            "categories": pieces,
-            "ss_accessories": parser.get_ss_accessories() if hasattr(parser, "get_ss_accessories") else {},
-            "summary_weights": parser.get_summary_weights() if hasattr(parser, "get_summary_weights") else {},
-            "panel_coverage": {},
-            "mark_qty": {},
-        }
-        for plist in pieces.values():
-            for p in plist:
-                shipper_data["mark_qty"][p.mark] = shipper_data["mark_qty"].get(p.mark, 0) + p.quantity
+        console.print("[dim]Logo: not found (report will run without header logo)[/dim]")
 
-        for extra in shippers[1:]:
-            console.print(f"   + merging {extra}")
-            ep = ShipperParser(extra)
-            epieces = ep.parse()
-            for cat, plist in epieces.items():
-                shipper_data["categories"].setdefault(cat, []).extend(plist)
-                for p in plist:
-                    shipper_data["mark_qty"][p.mark] = shipper_data["mark_qty"].get(p.mark, 0) + p.quantity
-            if hasattr(ep, "get_ss_accessories"):
-                for k, v in ep.get_ss_accessories().items():
-                    shipper_data["ss_accessories"][k] = shipper_data["ss_accessories"].get(k, 0) + v
-
-    accessories = shipper_data.get("ss_accessories", {})
-    if any(accessories.values()):
-        console.print(f"   Sliding clips : {accessories.get('sliding_clips', 0):,}")
-        console.print(f"   Thermal blocks: {accessories.get('thermal_blocks', 0):,}")
-
-    console.print(f"   Unique marks  : {len(shipper_data.get('mark_qty', {}))}")
-
-    drawings_data = {}
-    if drawings:
-        console.print(f"\n[cyan]2. Parsing drawings:[/cyan] {drawings}")
-        dparser = DrawingsParser(drawings)
-        member_tables = dparser.parse()
-        drawings_data = {
-            "member_tables": member_tables,
-            "mark_quantity_map": dparser.get_mark_quantity_map() if hasattr(dparser, "get_mark_quantity_map") else {},
-            "notes": dparser.get_notes() if hasattr(dparser, "get_notes") else {},
-        }
-        notes = drawings_data.get("notes") or {}
-        if isinstance(notes, dict):
-            if notes.get("has_mezzanine"):
-                drawings_data["has_mezzanine"] = True
-                console.print("   [yellow]Mezzanine detected[/yellow]")
-            if notes.get("has_crane"):
-                drawings_data["has_crane"] = True
-                console.print("   [yellow]Crane / runway referenced[/yellow]")
-        console.print(f"   Member marks  : {len(drawings_data.get('mark_quantity_map', {}))}")
+    job_number = job or extract_job_number(*shipper_paths, drawings_path or Path())
+    if job_number:
+        console.print(f"[bold]Job:[/bold] {job_number}")
     else:
-        console.print("\n[dim]2. No drawings supplied.[/dim]")
+        console.print("[yellow]Warning: could not detect job number from filenames; using UNKNOWN[/yellow]")
 
-    console.print("\n[cyan]3. Running discrepancy engine…[/cyan]")
-    engine = DiscrepancyEngine(shipper_data=shipper_data, drawings_data=drawings_data)
-    findings = engine.run()
+    if no_pdf:
+        from chubby_checker.automation import _parse_shippers, _parse_drawings
+        from chubby_checker.rules.engine import DiscrepancyEngine
 
-    critical = sum(1 for f in findings if getattr(f, "severity", "").upper() == "CRITICAL")
-    warning = sum(1 for f in findings if getattr(f, "severity", "").upper() == "WARNING")
-    info = sum(1 for f in findings if getattr(f, "severity", "").upper() == "INFO")
+        try:
+            console.print("\n[cyan]Running check without PDF…[/cyan]")
+            shipper_data = _parse_shippers(shipper_paths)
+            drawings_data = _parse_drawings(drawings_path)
+        except (MissingFileError, ChubbyCheckerError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise SystemExit(1)
+
+        engine = DiscrepancyEngine(shipper_data=shipper_data, drawings_data=drawings_data)
+        findings = engine.run()
+        critical = sum(1 for f in findings if getattr(f, "severity", "").upper() == "CRITICAL")
+        warning = sum(1 for f in findings if getattr(f, "severity", "").upper() == "WARNING")
+        info = sum(1 for f in findings if getattr(f, "severity", "").upper() == "INFO")
+        table = Table(title="Discrepancy Summary")
+        table.add_column("Severity", style="bold")
+        table.add_column("Count", justify="right")
+        table.add_row("[bold red]CRITICAL[/bold red]", str(critical))
+        table.add_row("[yellow]WARNING[/yellow]", str(warning))
+        table.add_row("[cyan]INFO[/cyan]", str(info))
+        console.print(table)
+        console.print("\n" + engine.report())
+        console.print("\n[dim]PDF report skipped (--no-pdf).[/dim]")
+        return
+
+    console.print("\n[cyan]Running automated check + PDF report…[/cyan]")
+    result = run_job(
+        shippers=shipper_paths,
+        drawings=drawings_path,
+        job_number=job_number,
+        output_dir=output_dir,
+        watermark=not no_watermark,
+        logo_path=logo_path,
+    )
+
+    if not result.success:
+        console.print(f"[bold red]Failed:[/bold red] {result.error}")
+        raise SystemExit(1)
 
     table = Table(title="Discrepancy Summary")
     table.add_column("Severity", style="bold")
     table.add_column("Count", justify="right")
-    table.add_row("[bold red]CRITICAL[/bold red]", str(critical))
-    table.add_row("[yellow]WARNING[/yellow]", str(warning))
-    table.add_row("[cyan]INFO[/cyan]", str(info))
+    table.add_row("[bold red]CRITICAL[/bold red]", str(result.critical))
+    table.add_row("[yellow]WARNING[/yellow]", str(result.warning))
+    table.add_row("[cyan]INFO[/cyan]", str(result.info))
     console.print(table)
-    console.print("\n" + engine.report())
 
-    if not no_pdf:
-        console.print("\n[cyan]4. Generating PDF report…[/cyan]")
-        pdf_path = generate_pdf_report(
-            discrepancies=findings,
-            job_number=job,
-            output_dir=output_dir,
-            check_date=check_date,
-            shipper_files=list(shippers),
-            drawings_file=drawings,
-            watermark=not no_watermark,
-            logo_path=logo_path,
-        )
-        console.print(f"   [bold green]Report saved:[/bold green] {pdf_path}")
-        if critical or warning:
-            console.print("[bold red]Status: ERRORS FOUND — review required before release.[/bold red]")
-        else:
-            console.print("[bold green]Status: NO ERRORS[/bold green]")
+    console.print(f"\n   [bold green]Report saved:[/bold green] {result.report_path}")
+    if result.critical or result.warning:
+        console.print("[bold red]Status: ERRORS FOUND — review required before release.[/bold red]")
     else:
-        console.print("\n[dim]PDF report skipped (--no-pdf).[/dim]")
+        console.print("[bold green]Status: NO ERRORS[/bold green]")
 
 
 if __name__ == "__main__":

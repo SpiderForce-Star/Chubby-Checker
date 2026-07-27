@@ -11,17 +11,25 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 from chubby_checker.branding import find_logo
+from chubby_checker.errors import (
+    ChubbyCheckerError,
+    MissingDirectoryError,
+    MissingFileError,
+    EmptyInputError,
+    require_shippers,
+    optional_pdf,
+    require_dir,
+    require_pdf,
+)
 from chubby_checker.parsers.shipper_parser import ShipperParser
 from chubby_checker.parsers.drawings_parser import DrawingsParser
 from chubby_checker.rules.engine import DiscrepancyEngine
-from chubby_checker.report.pdf_report import generate_pdf_report, build_report_filename
+from chubby_checker.report.pdf_report import generate_pdf_report
 
-# Ascent job numbers look like 25-13168, 25-13059, 24-10001
-JOB_RE = re.compile(r"(?P<job>\d{2}-\d{4,6})"
-)
+JOB_RE = re.compile(r"(?P<job>\d{2}-\d{4,6})")
 
 SHIPPER_HINTS = (
     "shipper", "complete shipper", "bom", "ph1", "ph2", "ph3", "ph4", "ph5", "ph6",
@@ -56,14 +64,14 @@ class RunResult:
 
 
 def extract_job_number(*paths: Path | str) -> Optional[str]:
-    """Pull first Ascent-style job number from file/folder names."""
     for p in paths:
-        name = Path(p).name if p else ""
+        if not p:
+            continue
+        name = Path(p).name
         m = JOB_RE.search(name)
         if m:
             return m.group("job")
-        # also check parent folder name
-        parent = Path(p).parent.name if p else ""
+        parent = Path(p).parent.name
         m = JOB_RE.search(parent)
         if m:
             return m.group("job")
@@ -85,19 +93,20 @@ def _is_drawings(path: Path) -> bool:
 
 
 def discover_jobs(root: Path, recursive: bool = True) -> List[JobBundle]:
-    """
-    Scan a folder for PDF pairs grouped by job number.
-
-    Supports:
-      - flat folder with mixed shipper/final PDFs
-      - subfolders named by job number
-      - multi-phase shippers for the same job
-    """
     root = Path(root)
+    if not root.exists():
+        raise MissingDirectoryError(root, role="jobs directory")
     if not root.is_dir():
-        raise FileNotFoundError(f"Jobs directory not found: {root}")
+        raise MissingDirectoryError(root, role="jobs directory (not a directory)")
 
     pdfs = list(root.rglob("*.pdf") if recursive else root.glob("*.pdf"))
+    if not pdfs:
+        raise ChubbyCheckerError(
+            f"No PDF files found under jobs directory: {root.resolve()}\n"
+            "Add Complete Shipper and/or Final Drawings PDFs (filenames should "
+            "include a job number like 25-13168)."
+        )
+
     bundles: Dict[str, JobBundle] = {}
 
     for pdf in sorted(pdfs):
@@ -109,7 +118,6 @@ def discover_jobs(root: Path, recursive: bool = True) -> List[JobBundle]:
             if pdf not in bundle.shippers:
                 bundle.shippers.append(pdf)
         elif _is_drawings(pdf):
-            # Prefer names containing FINAL / ERECTION when multiple exist
             if bundle.drawings is None:
                 bundle.drawings = pdf
             else:
@@ -117,13 +125,7 @@ def discover_jobs(root: Path, recursive: bool = True) -> List[JobBundle]:
                 score_old = sum(1 for h in ("final", "erection") if h in bundle.drawings.name.lower())
                 if score_new > score_old:
                     bundle.drawings = pdf
-        else:
-            # Unknown PDF with job number — treat as shipper fallback if none yet
-            if not bundle.shippers and "shipper" not in pdf.name.lower():
-                # only assign as drawings if final-like already handled above
-                pass
 
-    # Second pass: any job with PDFs but nothing classified — best-effort assign
     for pdf in sorted(pdfs):
         job = extract_job_number(pdf)
         if not job or job not in bundles:
@@ -134,11 +136,21 @@ def discover_jobs(root: Path, recursive: bool = True) -> List[JobBundle]:
         if b.drawings is None and _is_drawings(pdf):
             b.drawings = pdf
 
-    return [b for b in bundles.values() if b.ready]
+    ready = [b for b in bundles.values() if b.ready]
+    if not ready:
+        raise ChubbyCheckerError(
+            f"Found {len(pdfs)} PDF(s) under {root}, but none could be matched to a "
+            f"shipper for a job number.\n"
+            "Expected filenames like:\n"
+            "  25-13168-Complete-Shipper.pdf\n"
+            "  25-13168-FINAL-Drawings.pdf"
+        )
+    return ready
 
 
 def _parse_shippers(shipper_paths: Sequence[Path]) -> Dict[str, Any]:
-    paths = [Path(p) for p in shipper_paths]
+    paths = require_shippers(shipper_paths)
+
     if len(paths) > 1:
         try:
             from chubby_checker.parsers.multi_phase import MultiPhaseShipper
@@ -146,11 +158,21 @@ def _parse_shippers(shipper_paths: Sequence[Path]) -> Dict[str, Any]:
             data = agg.parse() if hasattr(agg, "parse") else {}
             if data:
                 return data
+        except MissingFileError:
+            raise
         except Exception:
             pass
 
-    parser = ShipperParser(str(paths[0]))
-    pieces = parser.parse()
+    try:
+        parser = ShipperParser(str(paths[0]))
+        pieces = parser.parse()
+    except FileNotFoundError as exc:
+        raise MissingFileError(paths[0], role="shipper PDF") from exc
+    except Exception as exc:
+        raise ChubbyCheckerError(
+            f"Failed to parse shipper PDF '{paths[0].name}': {exc}"
+        ) from exc
+
     shipper_data: Dict[str, Any] = {
         "categories": pieces,
         "ss_accessories": parser.get_ss_accessories() if hasattr(parser, "get_ss_accessories") else {},
@@ -163,8 +185,15 @@ def _parse_shippers(shipper_paths: Sequence[Path]) -> Dict[str, Any]:
             shipper_data["mark_qty"][p.mark] = shipper_data["mark_qty"].get(p.mark, 0) + p.quantity
 
     for extra in paths[1:]:
-        ep = ShipperParser(str(extra))
-        epieces = ep.parse()
+        try:
+            ep = ShipperParser(str(extra))
+            epieces = ep.parse()
+        except FileNotFoundError as exc:
+            raise MissingFileError(extra, role="shipper PDF (phase)") from exc
+        except Exception as exc:
+            raise ChubbyCheckerError(
+                f"Failed to parse phase shipper '{extra.name}': {exc}"
+            ) from exc
         for cat, plist in epieces.items():
             shipper_data["categories"].setdefault(cat, []).extend(plist)
             for p in plist:
@@ -178,8 +207,17 @@ def _parse_shippers(shipper_paths: Sequence[Path]) -> Dict[str, Any]:
 def _parse_drawings(drawings_path: Optional[Path]) -> Dict[str, Any]:
     if not drawings_path:
         return {}
-    dparser = DrawingsParser(str(drawings_path))
-    member_tables = dparser.parse()
+    path = require_pdf(drawings_path, role="drawings PDF")
+    try:
+        dparser = DrawingsParser(str(path))
+        member_tables = dparser.parse()
+    except FileNotFoundError as exc:
+        raise MissingFileError(path, role="drawings PDF") from exc
+    except Exception as exc:
+        raise ChubbyCheckerError(
+            f"Failed to parse drawings PDF '{path.name}': {exc}"
+        ) from exc
+
     data: Dict[str, Any] = {
         "member_tables": member_tables,
         "mark_quantity_map": dparser.get_mark_quantity_map() if hasattr(dparser, "get_mark_quantity_map") else {},
@@ -205,17 +243,31 @@ def run_job(
 ) -> RunResult:
     """
     Full automated pipeline for one job:
-      parse → discrepancy engine → PDF report (always generated)
+      validate paths → parse → discrepancy engine → PDF report
     """
-    shipper_paths = [Path(s) for s in shippers]
-    drawings_path = Path(drawings) if drawings else None
-    job = job_number or extract_job_number(*shipper_paths, drawings_path or Path())
-    job = job or "UNKNOWN"
-    check_date = check_date or datetime.now()
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    job = job_number or "UNKNOWN"
     try:
+        shipper_paths = require_shippers(shippers)
+        drawings_path = optional_pdf(drawings, role="drawings PDF") if drawings else None
+        job = job_number or extract_job_number(*shipper_paths, drawings_path or Path()) or "UNKNOWN"
+        check_date = check_date or datetime.now()
+        out = require_dir(output_dir, role="output directory", create=True)
+
+        # Logo is optional — warn via result only if explicitly requested path is missing
+        resolved_logo = None
+        if logo_path:
+            try:
+                from chubby_checker.errors import require_file
+                resolved_logo = require_file(logo_path, role="logo image")
+            except MissingFileError as exc:
+                return RunResult(
+                    job_number=job,
+                    success=False,
+                    error=str(exc),
+                )
+        else:
+            resolved_logo = find_logo()
+
         shipper_data = _parse_shippers(shipper_paths)
         drawings_data = _parse_drawings(drawings_path)
         engine = DiscrepancyEngine(shipper_data=shipper_data, drawings_data=drawings_data)
@@ -228,12 +280,12 @@ def run_job(
         report_path = generate_pdf_report(
             discrepancies=findings,
             job_number=job,
-            output_dir=output_dir,
+            output_dir=out,
             check_date=check_date,
             shipper_files=[str(p) for p in shipper_paths],
             drawings_file=str(drawings_path) if drawings_path else None,
             watermark=watermark,
-            logo_path=logo_path or find_logo(),
+            logo_path=resolved_logo,
         )
 
         return RunResult(
@@ -245,12 +297,16 @@ def run_job(
             info=info,
             findings=findings,
         )
-    except Exception as exc:
+    except (MissingFileError, MissingDirectoryError, EmptyInputError, ChubbyCheckerError) as exc:
+        return RunResult(job_number=job, success=False, error=str(exc))
+    except FileNotFoundError as exc:
         return RunResult(
             job_number=job,
             success=False,
-            error=str(exc),
+            error=f"Missing file: {exc.filename or exc}",
         )
+    except Exception as exc:
+        return RunResult(job_number=job, success=False, error=f"Unexpected error: {exc}")
 
 
 def run_batch(
@@ -262,16 +318,44 @@ def run_batch(
     only_jobs: Optional[Sequence[str]] = None,
 ) -> List[RunResult]:
     """Discover all jobs under jobs_dir and generate a PDF report for each."""
-    bundles = discover_jobs(Path(jobs_dir), recursive=recursive)
+    root = Path(jobs_dir)
+    if not root.exists():
+        raise MissingDirectoryError(root, role="jobs directory")
+    if not root.is_dir():
+        raise MissingDirectoryError(root, role="jobs directory")
+
+    bundles = discover_jobs(root, recursive=recursive)
     if only_jobs:
         allow = set(only_jobs)
         bundles = [b for b in bundles if b.job_number in allow]
+        if not bundles:
+            raise ChubbyCheckerError(
+                f"No matching jobs for --only filter {sorted(allow)} under {root}"
+            )
 
     results: List[RunResult] = []
     for bundle in bundles:
+        # Skip shipper paths that disappeared between discovery and run
+        existing = [p for p in bundle.shippers if p.is_file()]
+        if not existing:
+            results.append(RunResult(
+                job_number=bundle.job_number,
+                success=False,
+                error=f"Shipper PDF(s) missing for job {bundle.job_number}",
+            ))
+            continue
+        drawings = bundle.drawings if (bundle.drawings and bundle.drawings.is_file()) else None
+        if bundle.drawings and drawings is None:
+            results.append(RunResult(
+                job_number=bundle.job_number,
+                success=False,
+                error=f"Drawings PDF missing: {bundle.drawings}",
+            ))
+            continue
+
         result = run_job(
-            shippers=bundle.shippers,
-            drawings=bundle.drawings,
+            shippers=existing,
+            drawings=drawings,
             job_number=bundle.job_number,
             output_dir=output_dir,
             watermark=watermark,
