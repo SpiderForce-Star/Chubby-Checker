@@ -122,10 +122,8 @@ class DiscrepancyEngine:
         acc = self.shipper.get("ss_accessories", {}) or {}
         geo = self.geometry
         coverage = None
-        # prefer explicit panel_coverage map
         pc = self.shipper.get("panel_coverage") or {}
         if pc:
-            # dominant coverage key
             try:
                 coverage = float(max(pc.items(), key=lambda x: x[1])[0])
             except Exception:
@@ -135,6 +133,15 @@ class DiscrepancyEngine:
         endlap_lines = int(self.drawings.get("endlap_lines") or self.shipper.get("endlap_lines") or 0)
         slopes = int(getattr(geo, "slopes", None) or self.drawings.get("slopes") or 1)
         has_ins = bool(acc.get("thermal_blocks", 0) or self.drawings.get("has_insulation", True))
+        clip_key = self.shipper.get("clip_key") or self.drawings.get("clip_key")
+
+        # Build accessory text for library identification (part numbers / aliases)
+        accessory_bits = [self.shipper.get("raw_text") or ""]
+        for cat, pieces in (self.shipper.get("categories") or {}).items():
+            if any(k in cat.lower() for k in ("standing", "ss access", "clip", "seam")):
+                for p in pieces:
+                    accessory_bits.append(f"{getattr(p, 'mark', '')} {getattr(p, 'description', '')}")
+        accessory_text = " ".join(str(b) for b in accessory_bits if b)
 
         for f in check_standing_seam_system(
             ss_accessories=acc,
@@ -144,6 +151,8 @@ class DiscrepancyEngine:
             endlap_lines=endlap_lines,
             slopes=slopes,
             has_insulation=has_ins,
+            clip_key=clip_key,
+            accessory_text=accessory_text,
         ):
             self._add(f)
 
