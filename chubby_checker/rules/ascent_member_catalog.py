@@ -6,6 +6,16 @@ Sources (Base Camp Drafting Manual):
   - Built-Up Welded Members (BzzYxW)
   - Hot Rolled Pipe (PPccDDD) / Tube (TaaaBBBc)
   - Standard Punches (EP, LL, SL) context for secondary
+
+Part-code grammar (validated 2026-07-27 Heavy Grok audit):
+  Cee/Zee   C|Z + depth(8|10|12) + flange(25=2.5"|35=3.5") + gauge(12|14|16)
+            e.g. C82516, Z103512
+  Open Cee  U + depth(82|102|122) + 5 + gauge(12|14|16)
+            e.g. U82516 → 8.25", U122514 → 12.25"
+  Eave      depth(06|08|10) + botFl + topFl + gaugeCode + [slope] + optional ---
+  Built-up  B + depth(10-36) + web(a-k) + flangeW(0|2|5|6|8) + flangeT(a-k)
+  Pipe      PP + sizeDigit + wall*1000
+  Tube      TS|T + depth3 + width3 + thickLetter
 """
 
 from __future__ import annotations
@@ -41,17 +51,18 @@ OPEN_CEE_PLF = {
     "U122514": 4.15, "U122512": 5.98,
 }
 
-# Eave strut base codes (last 3 chars = slope code SU/SD/DU/DD)
+# Eave strut base codes (last digit before slope = gauge code 6→16, 4→14, 2→12)
 EAVE_STRUT_PLF = {
     "06436": 2.61, "06434": 3.22, "06432": 4.65,
     "08534": 3.92, "08532": 5.65,
     "10534": 4.61, "10532": 6.32,
 }
 
-# Built-up thickness letter codes
+# Built-up thickness letter codes (Base Camp continuous a–k)
 BUILTUP_THICK = {
     "a": 0.1345, "b": 0.1875, "c": 0.2500, "d": 0.3125,
-    "g": 0.3750, "h": 0.5000, "i": 0.6250, "j": 0.7500, "k": 1.0000,
+    "e": 0.3750, "f": 0.5000, "g": 0.6250, "h": 0.7500,
+    "i": 1.0000, "j": 0.7500, "k": 1.0000,
 }
 BUILTUP_FLANGE_WIDTH = {
     "5": 5.0, "6": 6.0, "8": 8.0, "0": 10.0, "2": 12.0,
@@ -89,43 +100,79 @@ def _norm(code: str) -> str:
 
 
 def decode_zee_cee(code: str) -> Optional[MemberDecode]:
+    """
+    Decode Cee / Zee / Open Cee part codes.
+
+    Cee/Zee grammar:  C|Z + depth(8|10|12) + flange(25|35) + gauge(12|14|16)
+      C82516  → 8" × 2.5" × 16 ga
+      Z103512 → 10" × 3.5" × 12 ga
+
+    Open Cee grammar: U + depth(82|102|122) + 5 + gauge(12|14|16)
+      U82516  → 8.25" × ~3" × 16 ga
+      U122514 → 12.25" × ~3" × 14 ga
+    """
     c = _norm(code)
-    # Z82516 / C102514 / U122512
-    m = re.match(r"^([ZCU])(\d{2})(\d)(\d{2})$", c)
-    if not m:
-        return None
-    kind_map = {"Z": "zee", "C": "cee", "U": "open_cee"}
-    kind = kind_map[m.group(1)]
-    depth = float(m.group(2))
-    # open cee depths coded as 82/102/122 → 8.25 / 10.25 / 12.25 conceptually; use nominal 8/10/12
-    flange_digit = int(m.group(3))
-    flange = 2.5 if flange_digit == 2 else 3.5 if flange_digit == 3 else float(flange_digit)
-    gauge = int(m.group(4))
-    plf_table = {"zee": ZEE_PLF, "cee": CEE_PLF, "open_cee": OPEN_CEE_PLF}[kind]
-    # try exact then without leading zeros issues
-    plf = plf_table.get(c) or plf_table.get(c.replace("Z10", "Z10"))
-    return MemberDecode(
-        raw=code, kind=kind, depth_in=depth, flange_in=flange, gauge=gauge,
-        weight_plf=plf, details={"part": c},
-    )
+
+    # ----- Cee / Zee -----
+    m = re.match(r"^([CZ])(8|10|12)(25|35)(12|14|16)$", c)
+    if m:
+        kind = "cee" if m.group(1) == "C" else "zee"
+        depth = float(m.group(2))
+        flange = 2.5 if m.group(3) == "25" else 3.5
+        gauge = int(m.group(4))
+        plf_table = CEE_PLF if kind == "cee" else ZEE_PLF
+        plf = plf_table.get(c)
+        return MemberDecode(
+            raw=code,
+            kind=kind,
+            depth_in=depth,
+            flange_in=flange,
+            gauge=gauge,
+            weight_plf=plf,
+            details={"part": c, "flange_code": m.group(3)},
+        )
+
+    # ----- Open Cee -----
+    m = re.match(r"^U(82|102|122)5(12|14|16)$", c)
+    if m:
+        depth_map = {"82": 8.25, "102": 10.25, "122": 12.25}
+        depth = depth_map[m.group(1)]
+        gauge = int(m.group(2))
+        plf = OPEN_CEE_PLF.get(c)
+        return MemberDecode(
+            raw=code,
+            kind="open_cee",
+            depth_in=depth,
+            flange_in=3.0,
+            gauge=gauge,
+            weight_plf=plf,
+            details={"part": c, "depth_code": m.group(1)},
+        )
+
+    return None
 
 
 def decode_eave_strut(code: str) -> Optional[MemberDecode]:
     c = _norm(code)
-    # 08534DU1 style — first 5 digits depth/flange/gauge
+    # 08534 / 08534DU / 08534---  — first 5 chars are depth+flanges+gaugeCode
     m = re.match(r"^(\d{5})([A-Z]{0,2})(\d?)$", c)
     if not m:
         return None
     base = m.group(1)
-    if base not in EAVE_STRUT_PLF and base[:5] not in EAVE_STRUT_PLF:
-        # try first 5 of longer
+    if base not in EAVE_STRUT_PLF:
         if len(c) >= 5 and c[:5] in EAVE_STRUT_PLF:
             base = c[:5]
         else:
             return None
     depth = float(base[:2])
+    # Gauge digit encoding: 6→16 ga, 4→14 ga, 2→12 ga
+    gauge_map = {"6": 16, "4": 14, "2": 12}
+    gauge = gauge_map.get(base[4])
     return MemberDecode(
-        raw=code, kind="eave_strut", depth_in=depth,
+        raw=code,
+        kind="eave_strut",
+        depth_in=depth,
+        gauge=gauge,
         weight_plf=EAVE_STRUT_PLF.get(base),
         details={"base": base, "slope_code": m.group(2) or ""},
     )
@@ -133,16 +180,20 @@ def decode_eave_strut(code: str) -> Optional[MemberDecode]:
 
 def decode_built_up(code: str) -> Optional[MemberDecode]:
     c = _norm(code)
-    # B22d0g
+    # B22d0g — depth 10–36"
     m = re.match(r"^B(\d{2})([a-k])([05268])([a-k])$", c, re.IGNORECASE)
     if not m:
         return None
     depth = float(m.group(1))
+    if not (10 <= depth <= 36):
+        return None
     web_t = BUILTUP_THICK.get(m.group(2).lower())
     fl_w = BUILTUP_FLANGE_WIDTH.get(m.group(3))
     fl_t = BUILTUP_THICK.get(m.group(4).lower())
     return MemberDecode(
-        raw=code, kind="built_up", depth_in=depth,
+        raw=code,
+        kind="built_up",
+        depth_in=depth,
         details={"web_thickness": web_t, "flange_width": fl_w, "flange_thickness": fl_t},
     )
 
@@ -151,11 +202,13 @@ def decode_pipe(code: str) -> Optional[MemberDecode]:
     c = _norm(code)
     if c in STOCK_PIPE:
         od, t = STOCK_PIPE[c]
-        return MemberDecode(raw=code, kind="pipe", depth_in=od, details={"od": od, "wall": t, "stock": True})
+        return MemberDecode(
+            raw=code, kind="pipe", depth_in=od,
+            details={"od": od, "wall": t, "stock": True},
+        )
     m = re.match(r"^PP(\d)(\d{3})$", c)
     if not m:
         return None
-    # simplified: first digit maps rough OD class 4/6/8/10
     size_map = {"4": 4.5, "6": 6.625, "8": 8.625, "1": 10.75}
     od = size_map.get(m.group(1))
     wall = int(m.group(2)) / 1000.0
@@ -164,15 +217,17 @@ def decode_pipe(code: str) -> Optional[MemberDecode]:
 
 def decode_tube(code: str) -> Optional[MemberDecode]:
     c = _norm(code)
-    # T080080C
-    m = re.match(r"^T(\d{3})(\d{3})([A-I])$", c, re.IGNORECASE)
+    # TS080080C or T080080C
+    m = re.match(r"^(?:TS|T)(\d{3})(\d{3})([A-I])$", c, re.IGNORECASE)
     if not m:
         return None
     depth = int(m.group(1)) / 10.0  # 080 → 8.0
     width = int(m.group(2)) / 10.0
     thick = TUBE_THICK.get(m.group(3).lower())
     return MemberDecode(
-        raw=code, kind="tube", depth_in=depth,
+        raw=code,
+        kind="tube",
+        depth_in=depth,
         details={"depth": depth, "width": width, "wall": thick},
     )
 
