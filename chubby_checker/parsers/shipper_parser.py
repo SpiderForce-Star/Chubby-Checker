@@ -7,6 +7,7 @@ Extracts:
 - Standing Seam accessories (clips, backup plates, thermal blocks, screws)
 
 Calibrated on real jobs: 25-13266, 25-13059, 25-13168 (PH1–PH6)
+and Ascent Central Seam Plus / Central-Loc / Central Span manuals.
 """
 
 from pathlib import Path
@@ -15,6 +16,14 @@ import re
 import pdfplumber
 from chubby_checker.models.piece import Piece
 from chubby_checker.utils.length import parse_length_to_inches
+
+# Official Ascent / Central States sliding & floating clip part numbers
+SLIDING_CLIP_PARTS = (
+    "CL2122", "CL2124", "CL2102", "CL2104",  # CSP / Central-Loc sliding
+    "CL200", "CL204", "CL208",              # Central-Loc fixed / utility
+    "CSP212", "CS2124", "CS2122", "CSP2124",  # shipper aliases
+    "SPLCLIP", "SPHCLIP",                    # Central Span floating
+)
 
 
 class ShipperParser:
@@ -30,6 +39,9 @@ class ShipperParser:
             "clip_screws": 0,
             "hi_eave_plates": 0,
             "hi_rake_supports": 0,
+            "eave_plates_low": 0,
+            "rake_supports_low": 0,
+            "bearing_plates": 0,
         }
         self.raw_text_pages: List[str] = []
 
@@ -163,9 +175,11 @@ class ShipperParser:
         self._extract_ss_from_text(text)
 
     def _extract_ss_from_text(self, text: str):
+        clip_alt = "|".join(re.escape(p) for p in SLIDING_CLIP_PARTS)
         patterns = {
             "sliding_clips": [
-                r"(\d+)\s+(?:CSP212|CS2124|2\" High Sliding Clip)",
+                rf"(\d+)\s+(?:{clip_alt})",
+                r"(\d+)\s+(?:2\" High Sliding Clip|Sliding Clip)",
                 r"(\d+)\s+.*Sliding Clip",
             ],
             "backup_plates_24": [
@@ -175,17 +189,28 @@ class ShipperParser:
                 r"(\d+)\s+(?:CL7769|18\" Back Up Plate)",
             ],
             "thermal_blocks": [
-                r"(\d+)\s+(?:CL575|1\" Thermal Block)",
+                r"(\d+)\s+(?:CL575|1\" Thermal Block|Thermal Spacer)",
             ],
             "clip_screws": [
                 r"(\d+)\s+.*Panel Clip Screw",
                 r"(\d+)\s+FSS10",
+                r"(\d+)\s+FSS1\b",
+                r"(\d+)\s+FT1\b",
             ],
             "hi_eave_plates": [
-                r"(\d+)\s+(?:CL7616|Hi-Eave Plate)",
+                r"(\d+)\s+(?:CL7616|Hi-Eave Plate|Eave Plate,? High)",
+            ],
+            "eave_plates_low": [
+                r"(\d+)\s+(?:CL7600|Eave Plate,? Low)",
             ],
             "hi_rake_supports": [
-                r"(\d+)\s+(?:CL7720|Hi-Rake Support)",
+                r"(\d+)\s+(?:CL7720|Hi-Rake Support|Rake Support,? High)",
+            ],
+            "rake_supports_low": [
+                r"(\d+)\s+(?:CL7710|Rake Support,? Low)",
+            ],
+            "bearing_plates": [
+                r"(\d+)\s+(?:CL7500|Bearing Plate)",
             ],
         }
         for key, pats in patterns.items():
@@ -193,24 +218,34 @@ class ShipperParser:
                 m = re.search(pat, text, re.IGNORECASE)
                 if m:
                     try:
-                        self.ss_accessories[key] = max(self.ss_accessories[key], int(m.group(1)))
+                        self.ss_accessories[key] = max(self.ss_accessories.get(key, 0), int(m.group(1)))
                     except ValueError:
                         pass
 
     def _capture_ss_accessory(self, mark: str, desc: str, qty: int):
-        combined = f"{mark} {desc}".upper()
-        if "SLIDING CLIP" in combined or "CSP212" in combined or "CS2124" in combined:
+        combined = f"{mark} {desc}".upper().replace("-", "")
+        mark_u = mark.upper().replace("-", "")
+
+        if any(p.replace("-", "") in combined for p in SLIDING_CLIP_PARTS) or "SLIDING CLIP" in combined or "FIXED CLIP" in combined or "FLOATING CLIP" in combined or "UTILITY CLIP" in combined:
             self.ss_accessories["sliding_clips"] += qty
-        elif "24\" BACK" in combined or "CL7760" in combined:
+        elif "CL7760" in combined or "24\" BACK" in combined or "24 BACK" in combined:
             self.ss_accessories["backup_plates_24"] += qty
-        elif "18\" BACK" in combined or "CL7769" in combined:
+        elif "CL7769" in combined or "18\" BACK" in combined or "18 BACK" in combined:
             self.ss_accessories["backup_plates_18"] += qty
-        elif "THERMAL BLOCK" in combined or "CL575" in combined:
+        elif "THERMAL" in combined or "CL575" in combined:
             self.ss_accessories["thermal_blocks"] += qty
-        elif "HI-EAVE" in combined or "CL7616" in combined:
+        elif "CL7616" in combined or "HI-EAVE" in combined or "HI EAVE" in combined:
             self.ss_accessories["hi_eave_plates"] += qty
-        elif "HI-RAKE" in combined or "CL7720" in combined:
+        elif "CL7600" in combined:
+            self.ss_accessories["eave_plates_low"] += qty
+        elif "CL7720" in combined or "HI-RAKE" in combined or "HI RAKE" in combined:
             self.ss_accessories["hi_rake_supports"] += qty
+        elif "CL7710" in combined:
+            self.ss_accessories["rake_supports_low"] += qty
+        elif "CL7500" in combined or "BEARING PLATE" in combined:
+            self.ss_accessories["bearing_plates"] += qty
+        elif any(x in combined for x in ("FSS1", "FSS10", "FT1", "PANEL CLIP SCREW", "CLIP SCREW")):
+            self.ss_accessories["clip_screws"] += qty
 
     def _post_process_ss_accessories(self):
         pass
