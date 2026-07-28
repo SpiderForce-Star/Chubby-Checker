@@ -19,8 +19,17 @@ dependencies = [
   "reportlab>=4.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
 [project.scripts]
 chubby-checker = "chubby_checker.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["chubby_checker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
