@@ -25,6 +25,9 @@ from chubby_checker.rules.buyouts import (
     is_buyout_text,
 )
 from chubby_checker.rules.weight_rules import check_weight_rollup
+from chubby_checker.rules.bolt_rules import check_bolts
+from chubby_checker.rules.standing_seam_system import check_standing_seam_system
+from chubby_checker.rules.sheeting_fasteners import check_sheeting_fasteners
 
 
 @dataclass
@@ -44,14 +47,15 @@ class DiscrepancyEngine:
         shipper_data: Dict[str, Any],
         drawings_data: Optional[Dict[str, Any]] = None,
         building_geometry: Optional[BuildingGeometry] = None,
+        connection_counts: Optional[Dict[str, int]] = None,
     ):
         self.shipper = shipper_data or {}
         self.drawings = drawings_data or {}
         self.geometry = building_geometry
+        self.connection_counts = connection_counts or self.drawings.get("connection_counts") or {}
         self.discrepancies: List[Discrepancy] = []
 
     def _add(self, finding: Dict[str, Any]):
-        """Append a finding dict, filling optional fields."""
         payload = {
             "severity": finding.get("severity", "INFO"),
             "category": finding.get("category", "General"),
@@ -67,6 +71,9 @@ class DiscrepancyEngine:
         self._check_buyouts()
         self._check_weight_rollups()
         self._check_framing_review()
+        self._check_bolts()
+        self._check_standing_seam_system()
+        self._check_sheeting_fasteners()
         self._check_panel_and_accessories()
         self._check_thermal_blocks_verified()
         self._check_clip_screw_ratio()
@@ -77,28 +84,19 @@ class DiscrepancyEngine:
         self._check_system_flags()
         return self.discrepancies
 
-    # ------------------------------------------------------------------
-    # Buy-outs
-    # ------------------------------------------------------------------
     def _check_buyouts(self):
-        cats = self.shipper.get("categories", {})
-        for f in check_unexpected_buyouts(cats):
+        for f in check_unexpected_buyouts(self.shipper.get("categories", {})):
             self._add(f)
 
-    # ------------------------------------------------------------------
-    # Weight roll-up
-    # ------------------------------------------------------------------
     def _check_weight_rollups(self):
-        cats = self.shipper.get("categories", {})
-        weights = self.shipper.get("summary_weights", {}) or {}
-        for f in check_weight_rollup(cats, weights):
+        for f in check_weight_rollup(
+            self.shipper.get("categories", {}),
+            self.shipper.get("summary_weights", {}) or {},
+        ):
             if "rule" not in f:
                 f["rule"] = "weight_rollup"
             self._add(f)
 
-    # ------------------------------------------------------------------
-    # Framing
-    # ------------------------------------------------------------------
     def _check_framing_review(self):
         categories = self.shipper.get("categories", {})
         drawings_map = self.drawings.get("mark_quantity_map") or {}
@@ -106,13 +104,65 @@ class DiscrepancyEngine:
             for pieces in self.drawings.get("member_tables", {}).values():
                 for p in pieces:
                     drawings_map[p.mark] = drawings_map.get(p.mark, 0) + p.quantity
-
         for f in full_framing_review(categories, drawings_marks=drawings_map or None):
             self._add(f)
 
-    # ------------------------------------------------------------------
-    # Thermal blocks
-    # ------------------------------------------------------------------
+    def _check_bolts(self):
+        drawings_text = self.drawings.get("raw_text") or self.drawings.get("notes_text") or ""
+        if isinstance(self.drawings.get("notes"), dict):
+            drawings_text = drawings_text or str(self.drawings.get("notes"))
+        for f in check_bolts(
+            self.shipper.get("categories", {}),
+            drawings_text=drawings_text if isinstance(drawings_text, str) else "",
+            connection_counts=self.connection_counts or None,
+        ):
+            self._add(f)
+
+    def _check_standing_seam_system(self):
+        acc = self.shipper.get("ss_accessories", {}) or {}
+        geo = self.geometry
+        coverage = None
+        # prefer explicit panel_coverage map
+        pc = self.shipper.get("panel_coverage") or {}
+        if pc:
+            # dominant coverage key
+            try:
+                coverage = float(max(pc.items(), key=lambda x: x[1])[0])
+            except Exception:
+                coverage = None
+        width_ft = getattr(geo, "width_ft", None) if geo else self.drawings.get("width_ft")
+        purlin_lines = self.drawings.get("purlin_lines") or self.shipper.get("purlin_lines")
+        endlap_lines = int(self.drawings.get("endlap_lines") or self.shipper.get("endlap_lines") or 0)
+        slopes = int(getattr(geo, "slopes", None) or self.drawings.get("slopes") or 1)
+        has_ins = bool(acc.get("thermal_blocks", 0) or self.drawings.get("has_insulation", True))
+
+        for f in check_standing_seam_system(
+            ss_accessories=acc,
+            panel_coverage_in=coverage,
+            building_width_ft=float(width_ft) if width_ft else None,
+            purlin_lines=int(purlin_lines) if purlin_lines else None,
+            endlap_lines=endlap_lines,
+            slopes=slopes,
+            has_insulation=has_ins,
+        ):
+            self._add(f)
+
+    def _check_sheeting_fasteners(self):
+        geo = self.geometry
+        width_ft = getattr(geo, "width_ft", None) if geo else self.drawings.get("width_ft")
+        length_ft = getattr(geo, "length_ft", None) if geo else self.drawings.get("length_ft")
+        support_lines = self.drawings.get("purlin_lines") or self.drawings.get("support_lines")
+        for f in check_sheeting_fasteners(
+            categories=self.shipper.get("categories", {}),
+            panel_key=self.shipper.get("exposed_panel_key") or self.drawings.get("exposed_panel_key"),
+            area_width_ft=float(width_ft) if width_ft else None,
+            slope_length_ft=float(length_ft) if length_ft else None,
+            support_lines=int(support_lines) if support_lines else None,
+            eave_endlap_lines=int(self.drawings.get("eave_endlap_lines") or 2),
+            is_roof=bool(self.drawings.get("is_roof", True)),
+        ):
+            self._add(f)
+
     def _check_thermal_blocks_verified(self):
         accessories = self.shipper.get("ss_accessories", {})
         clips = accessories.get("sliding_clips", 0)
@@ -121,13 +171,9 @@ class DiscrepancyEngine:
         for f in check_thermal_blocks(clips, blocks, has_insulation=has_insulation):
             self._add(f)
 
-    # ------------------------------------------------------------------
-    # Closures / Trim / Gutter
-    # ------------------------------------------------------------------
     def _check_closures_trim_gutter(self):
         categories = self.shipper.get("categories", {})
         raw_text = self.shipper.get("raw_text", "")
-
         panel_cats = [
             c for c in categories
             if any(k in c.lower() for k in [
@@ -137,14 +183,11 @@ class DiscrepancyEngine:
         ]
         has_panels = bool(panel_cats)
         panel_count = sum(getattr(p, "quantity", 0) for c in panel_cats for p in categories.get(c, []))
-
         for f in check_closures_present(extract_closure_counts(categories, raw_text), has_panels, panel_count):
             self._add(f)
-
         trim_info = extract_trim_info(categories)
         for f in check_rivets_for_trim(extract_rivet_count(categories, raw_text), trim_info["count"]):
             self._add(f)
-
         if trim_info["count"] > 0:
             msg = f"Trim pieces detected: {trim_info['count']} (unique marks: {trim_info['unique_marks']})"
             if trim_info.get("total_length_ft"):
@@ -153,24 +196,18 @@ class DiscrepancyEngine:
                 "severity": "INFO", "category": "Trim", "message": msg,
                 "actual": trim_info["count"], "rule": "trim_present",
             })
-
         gd = extract_gutter_downspout(categories, raw_text)
         for f in check_gutter_downspout(gd, has_roof_panels=has_panels, geo=self.geometry):
             self._add(f)
-
         for f in check_trim_lengths_against_geometry(trim_info, self.geometry):
             self._add(f)
 
-    # ------------------------------------------------------------------
-    # Mark-by-mark (buy-outs filtered)
-    # ------------------------------------------------------------------
     def _check_mark_by_mark(self):
         drawings_map = self.drawings.get("mark_quantity_map") or {}
         if not drawings_map:
             for pieces in self.drawings.get("member_tables", {}).values():
                 for p in pieces:
                     drawings_map[p.mark] = drawings_map.get(p.mark, 0) + p.quantity
-
         if not drawings_map:
             self._add({
                 "severity": "INFO", "category": "Comparison",
@@ -178,17 +215,13 @@ class DiscrepancyEngine:
                 "rule": "mark_by_mark",
             })
             return
-
-        # Do not flag buy-out marks as missing from Ascent shipper
         drawings_map = filter_buyouts_from_marks(drawings_map)
-
         shipper_map: Dict[str, int] = {}
         for pieces in self.shipper.get("categories", {}).values():
             for p in pieces:
                 if is_buyout_text(f"{p.mark} {getattr(p, 'description', '')}"):
                     continue
                 shipper_map[p.mark] = shipper_map.get(p.mark, 0) + p.quantity
-
         for mark, expected_qty in drawings_map.items():
             actual_qty = shipper_map.get(mark, 0)
             if actual_qty == 0:
@@ -209,15 +242,12 @@ class DiscrepancyEngine:
         for pieces in self.drawings.get("member_tables", {}).values():
             for p in pieces:
                 drawings_pieces.setdefault(p.mark, []).append(p)
-
         shipper_pieces: Dict[str, list] = {}
         for pieces in self.shipper.get("categories", {}).values():
             for p in pieces:
                 shipper_pieces.setdefault(p.mark, []).append(p)
-
         if not drawings_pieces or not shipper_pieces:
             return
-
         for mark, d_list in drawings_pieces.items():
             if mark not in shipper_pieces:
                 continue
