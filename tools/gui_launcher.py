@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chubby Checker GUI Launcher with pulse drag animation."""
+"""Chubby Checker GUI Launcher with optimized pulse drag animation."""
 from __future__ import annotations
 import os, sys, threading, webbrowser
 from pathlib import Path
@@ -15,7 +15,10 @@ _NORMAL_BG = "#f0f0f0"
 _DROP_BG = "#e3f2fd"
 _DROP_BORDER = "#1565c0"
 _DROP_OVERLAY_FG = "#0d47a1"
-_PULSE_FRAMES = [("#1565c0", 3), ("#1976d2", 3), ("#42a5f5", 4), ("#64b5f6", 4), ("#42a5f5", 4), ("#1976d2", 3)]
+# Border-color only pulse (fixed thickness) — fewer geometry invalidations
+_PULSE_COLORS = ("#1565c0", "#1e88e5", "#42a5f5", "#1e88e5")
+_PULSE_INTERVAL_MS = 140  # ~7 fps — smooth enough, low overhead
+_PULSE_THICKNESS = 3
 def _show_access_gate(root):
     granted = {"ok": False}
     gate = Toplevel(root); gate.title("Chubby Checker - Access"); gate.resizable(False, False); gate.transient(root); gate.grab_set()
@@ -40,7 +43,7 @@ class ChubbyCheckerGUI:
     def __init__(self, root):
         self.root = root; self.root.title("Chubby Checker"); self.root.minsize(680, 560); self.root.geometry("760x620"); self.root.configure(bg=_NORMAL_BG)
         self.shipper_paths = []; self.drawings_paths = []; self.report_path = None
-        self._drag_active = False; self._pulse_after_id = None; self._pulse_index = 0
+        self._drag_active = False; self._pulse_after_id = None; self._pulse_index = 0; self._last_pulse_color = None
         self._build_ui(); self._center(); self._enable_dnd()
     def _build_ui(self):
         pad = {"padx": 10, "pady": 4}
@@ -108,37 +111,55 @@ class ChubbyCheckerGUI:
         except Exception:
             self._log("Drag-and-drop unavailable - install tkinterdnd2 for full support.")
     def _set_drop_visual(self, active):
+        """Toggle drop highlight. Pulse is color-only for lower overhead."""
+        if active == self._drag_active:
+            return  # no-op if state unchanged (avoids restart storms)
         self._drag_active = active
         if active:
-            self.root.configure(bg=_DROP_BG); self.main.configure(bg=_DROP_BG)
-            self.drop_zone.configure(bg=_DROP_BG, highlightbackground=_DROP_BORDER, highlightthickness=3)
+            self.root.configure(bg=_DROP_BG)
+            self.main.configure(bg=_DROP_BG)
+            self.drop_zone.configure(bg=_DROP_BG, highlightbackground=_DROP_BORDER, highlightthickness=_PULSE_THICKNESS)
             self.drop_hint.configure(text="v  DROP PDFs HERE  v", fg=_DROP_OVERLAY_FG, bg=_DROP_BG, font=("Segoe UI", 11, "bold"))
             self._start_pulse()
         else:
             self._stop_pulse()
-            self.root.configure(bg=_NORMAL_BG); self.main.configure(bg=_NORMAL_BG)
+            self.root.configure(bg=_NORMAL_BG)
+            self.main.configure(bg=_NORMAL_BG)
             self.drop_zone.configure(bg="#fafafa", highlightbackground="#cccccc", highlightthickness=2)
             self.drop_hint.configure(text="v  Drag & drop Shipper / Drawings PDFs here  v", fg="#666666", bg="#fafafa", font=("Segoe UI", 10))
     def _start_pulse(self):
+        """Start border-color pulse if not already running."""
         self._pulse_index = 0
-        if self._pulse_after_id is None: self._pulse_tick()
+        self._last_pulse_color = None
+        if self._pulse_after_id is None:
+            self._pulse_tick()
     def _stop_pulse(self):
-        if self._pulse_after_id is not None:
-            try: self.root.after_cancel(self._pulse_after_id)
-            except Exception: pass
+        """Cancel scheduled pulse frame; safe to call repeatedly."""
+        aid = self._pulse_after_id
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
             self._pulse_after_id = None
         self._pulse_index = 0
+        self._last_pulse_color = None
     def _pulse_tick(self):
+        """Single lightweight frame: update border color only when it changes."""
         if not self._drag_active:
-            self._pulse_after_id = None; return
-        color, thickness = _PULSE_FRAMES[self._pulse_index % len(_PULSE_FRAMES)]
-        try:
-            self.drop_zone.configure(highlightbackground=color, highlightthickness=thickness)
-            self.drop_hint.configure(fg=_DROP_OVERLAY_FG if self._pulse_index % 2 == 0 else "#1976d2")
-        except Exception:
-            self._pulse_after_id = None; return
+            self._pulse_after_id = None
+            return
+        color = _PULSE_COLORS[self._pulse_index % len(_PULSE_COLORS)]
+        if color != self._last_pulse_color:
+            try:
+                # Color-only update — no thickness / text changes (avoids layout thrash)
+                self.drop_zone.configure(highlightbackground=color)
+                self._last_pulse_color = color
+            except Exception:
+                self._pulse_after_id = None
+                return
         self._pulse_index += 1
-        self._pulse_after_id = self.root.after(90, self._pulse_tick)
+        self._pulse_after_id = self.root.after(_PULSE_INTERVAL_MS, self._pulse_tick)
     def _on_drag_enter(self, event): self._set_drop_visual(True)
     def _on_drag_leave(self, event): self._set_drop_visual(False)
     def _on_drop(self, event):
