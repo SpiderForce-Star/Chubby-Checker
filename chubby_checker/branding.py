@@ -1,5 +1,5 @@
 """
-Branding assets for Ascent Shipper Checker.
+Branding assets for Chubby Checker.
 
 Resolves the official Ascent Buildings logo and product names for CLI, PDF
 reports, and watermarks.
@@ -10,8 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-PRODUCT_NAME = "Ascent Shipper Checker"
-CODENAME = "Chubby Checker"
+PRODUCT_NAME = "Chubby Checker"
 COMPANY_NAME = "Ascent Buildings"
 
 # Candidate logo paths relative to repo root / install layout

@@ -1,5 +1,5 @@
 """
-Cryptographic license validation for Ascent Shipper Checker.
+Cryptographic license validation for Chubby Checker.
 
 Design
 ------
@@ -34,9 +34,8 @@ from typing import Any, Dict, List, Optional
 # ---------------------------------------------------------------------------
 # Product identity
 # ---------------------------------------------------------------------------
-PRODUCT_NAME = "Ascent Shipper Checker"
-CODENAME = "Chubby Checker"
-PRODUCT_ID = "ascent-shipper-checker"
+PRODUCT_NAME = "Chubby Checker"
+PRODUCT_ID = "chubby-checker"
 
 # ---------------------------------------------------------------------------
 # Signing secret
@@ -47,8 +46,8 @@ PRODUCT_ID = "ascent-shipper-checker"
 # a secure config path that is not in the public tree).
 _LICENSE_SECRET = b"AscentBuildings-ShipperChecker-2026-HMAC-TwistRoot-v1"
 
-# Legacy bootstrap still accepted for transition (remove after full rollout)
-_LEGACY_ACCESS_CODE = "Twist"
+# Legacy bootstrap still accepted for transition
+_LEGACY_ACCESS_CODE = "Twist1960"
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -137,7 +136,7 @@ def validate_license_key(license_key: str) -> LicenseInfo:
             product=PRODUCT_ID,
             licensee="Ascent Buildings (legacy access code)",
             features=["full"],
-            message="Accepted legacy access code. Issue a signed license for production use.",
+            message="Accepted access code.",
         )
 
     if "." not in license_key:
@@ -158,7 +157,7 @@ def validate_license_key(license_key: str) -> LicenseInfo:
         return LicenseInfo(valid=False, message="Invalid license payload JSON.")
 
     product = payload.get("product") or payload.get("product_id") or ""
-    if product not in (PRODUCT_ID, PRODUCT_NAME, CODENAME):
+    if product not in (PRODUCT_ID, PRODUCT_NAME, "ascent-shipper-checker", "Ascent Shipper Checker"):
         return LicenseInfo(
             valid=False,
             message=f"License product mismatch: {product!r}",
@@ -251,13 +250,13 @@ def require_license(
     if key is None and interactive and sys.stdin.isatty():
         try:
             import getpass
-            key = getpass.getpass(f"{PRODUCT_NAME} license key (or legacy access code): ")
+            key = getpass.getpass(f"{PRODUCT_NAME} access code or license key: ")
         except (KeyboardInterrupt, EOFError):
             key = None
 
     if not key:
         print(
-            f"\n{PRODUCT_NAME} requires a valid license.\n"
+            f"\n{PRODUCT_NAME} requires a valid access code or license.\n"
             "Provide one of:\n"
             "  --license <key>\n"
             "  --license-file <path>\n"
