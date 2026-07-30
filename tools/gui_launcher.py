@@ -19,6 +19,145 @@ _DROP_OVERLAY_FG = "#0d47a1"
 _PULSE_COLORS = ("#1565c0", "#1e88e5", "#42a5f5", "#1e88e5")
 _PULSE_INTERVAL_MS = 140  # ~7 fps — smooth enough, low overhead
 _PULSE_THICKNESS = 3
+
+def _find_loading_video() -> Path | None:
+    """Locate Loading.mp4 (repo root or assets)."""
+    candidates = (
+        _ROOT / "Loading.mp4",
+        _ROOT / "assets" / "Loading.mp4",
+        _ROOT / "assets" / "branding" / "Loading.mp4",
+        Path.cwd() / "Loading.mp4",
+    )
+    for p in candidates:
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
+
+
+def _show_loading_video(root) -> None:
+    """
+    Play Chubby Checker / Ascent intro (Loading.mp4) before access code.
+    Esc or click to skip. Falls back to short branded splash if needed.
+    """
+    video_path = _find_loading_video()
+    skipped = {"yes": False}
+
+    splash = Toplevel(root)
+    splash.title("Chubby Checker")
+    splash.configure(bg="#0d1117")
+    splash.overrideredirect(True)
+    try:
+        splash.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    disp_w, disp_h = 720, 405
+    sw = splash.winfo_screenwidth()
+    sh = splash.winfo_screenheight()
+    x = max(0, (sw - disp_w) // 2)
+    y = max(0, (sh - disp_h) // 2)
+    splash.geometry(f"{disp_w}x{disp_h}+{x}+{y}")
+
+    canvas_frame = Frame(splash, bg="#0d1117", width=disp_w, height=disp_h)
+    canvas_frame.pack(fill=BOTH, expand=True)
+    canvas_frame.pack_propagate(False)
+
+    label = Label(
+        canvas_frame, bg="#0d1117", fg="#e6edf3",
+        text="Chubby Checker\nLoading…", font=("Segoe UI", 16, "bold"), justify="center",
+    )
+    label.pack(fill=BOTH, expand=True)
+
+    hint = Label(splash, text="Press Esc or click to skip", bg="#0d1117",
+                 fg="#8b949e", font=("Segoe UI", 9))
+    hint.place(relx=0.5, rely=0.97, anchor="s")
+
+    def skip(event=None):
+        skipped["yes"] = True
+        try:
+            splash.destroy()
+        except Exception:
+            pass
+
+    splash.bind("<Escape>", skip)
+    splash.bind("<Button-1>", skip)
+    label.bind("<Button-1>", skip)
+    try:
+        splash.focus_force()
+    except Exception:
+        pass
+
+    played = False
+    if video_path is not None:
+        try:
+            import cv2  # type: ignore
+            cap = cv2.VideoCapture(str(video_path))
+            if cap.isOpened():
+                fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+                delay_ms = max(1, int(1000 / fps))
+                photo_holder = {"img": None}
+
+                def tick():
+                    if skipped["yes"]:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        return
+                    try:
+                        ok, frame = cap.read()
+                    except Exception:
+                        ok, frame = False, None
+                    if not ok or frame is None:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        try:
+                            splash.destroy()
+                        except Exception:
+                            pass
+                        return
+                    try:
+                        h, w = frame.shape[:2]
+                        scale = min(disp_w / max(w, 1), disp_h / max(h, 1))
+                        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+                        frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        ppm = f"P6 {nw} {nh} 255 ".encode("ascii") + frame.tobytes()
+                        img = __import__("tkinter").PhotoImage(data=ppm, format="PPM")
+                        photo_holder["img"] = img
+                        label.configure(image=img, text="")
+                    except Exception:
+                        pass
+                    if not skipped["yes"]:
+                        try:
+                            splash.after(delay_ms, tick)
+                        except Exception:
+                            pass
+
+                played = True
+                splash.after(30, tick)
+                splash.wait_window()
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+        except Exception:
+            played = False
+
+    if not played and not skipped["yes"]:
+        def close_fallback():
+            if not skipped["yes"]:
+                try:
+                    splash.destroy()
+                except Exception:
+                    pass
+        label.configure(text="Chubby Checker\nAscent Buildings", font=("Segoe UI", 18, "bold"), fg="#e6edf3")
+        splash.after(2500, close_fallback)
+        splash.wait_window()
+
+
 def _show_access_gate(root):
     granted = {"ok": False}
     gate = Toplevel(root); gate.title("Chubby Checker - Access"); gate.resizable(False, False); gate.transient(root); gate.grab_set()
@@ -247,6 +386,8 @@ def main():
     try:
         from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1)
     except Exception: pass
+    # Intro video every launch, then access code gate
+    _show_loading_video(root)
     if not _show_access_gate(root): root.destroy(); sys.exit(0)
     root.deiconify(); ChubbyCheckerGUI(root); root.mainloop()
 if __name__ == "__main__": main()
