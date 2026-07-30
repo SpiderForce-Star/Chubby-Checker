@@ -523,7 +523,7 @@ class ChubbyCheckerGUI:
         actions = Frame(self.main, bg=_NORMAL_BG); actions.pack(fill=X, pady=10)
         self.run_btn = Button(actions, text="  Run Check  ", command=self._start_run, font=("Segoe UI", 11, "bold"), bg="#1a7f37", fg="white", padx=12, pady=4); self.run_btn.pack(side=LEFT)
         self.open_btn = Button(actions, text="Open Report", command=self._open_report, state=DISABLED, padx=10); self.open_btn.pack(side=LEFT, padx=8)
-        Button(actions, text="Clear Log", command=self._clear_log).pack(side=RIGHT)
+        Button(actions, text="Clear Files", command=self._clear_files).pack(side=RIGHT)
         Label(self.main, text="Results", anchor=W, bg=_NORMAL_BG).pack(fill=X, pady=(4,0))
         log_frame = Frame(self.main, bg=_NORMAL_BG); log_frame.pack(fill=BOTH, expand=True, pady=4)
         self.log = Text(log_frame, height=12, wrap="word", font=("Consolas", 9), state=DISABLED)
@@ -767,10 +767,24 @@ class ChubbyCheckerGUI:
         self.log.see(END)
         self.log.configure(state=DISABLED)
 
-    def _clear_log(self):
+    def _clear_files(self):
+        """Clear loaded PDFs, job field, report handle, and results log."""
+        self.shipper_paths = []
+        self.drawings_paths = []
+        self.report_path = None
+        try:
+            self.job_var.set("")
+        except Exception:
+            pass
+        try:
+            self.open_btn.configure(state=DISABLED)
+        except Exception:
+            pass
+        self._refresh_file_labels()
         self.log.configure(state=NORMAL)
         self.log.delete("1.0", END)
         self.log.configure(state=DISABLED)
+        self._log(f"{PRODUCT_NAME} ready.\nFiles cleared. Select or drop Complete Shipper PDF(s) to begin.")
 
     def _pick_shippers(self):
         paths = filedialog.askopenfilenames(
