@@ -57,10 +57,30 @@ class AppLauncher:
             windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
+        self._apply_window_icon(self.root)
         self._photo_holder = None
         self._cap = None
         self._intro_done = False
         self._gui = None
+
+    @staticmethod
+    def _apply_window_icon(win) -> None:
+        """Taskbar / window icon from assets/branding/ascent_chubby.ico when present."""
+        for rel in (
+            "assets/branding/ascent_chubby.ico",
+            "assets/branding/chubby_checker.ico",
+            "assets/branding/ascent_shipper_checker.ico",
+        ):
+            ico = _ROOT / rel
+            if ico.is_file():
+                try:
+                    win.iconbitmap(default=str(ico))
+                except Exception:
+                    try:
+                        win.iconbitmap(str(ico))
+                    except Exception:
+                        pass
+                return
 
     def run(self) -> None:
         _log("Launch sequence starting")

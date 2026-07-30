@@ -13,7 +13,8 @@ Place the official Ascent Buildings logo here:
 | `ascent_logo.jpg` | Alternate master |
 | `app_icon.png` | 256×256 app icon |
 | `icon_256.png` | Standard mid-size icon |
-| `ascent_shipper_checker.ico` | Windows application icon |
+| `ascent_chubby.ico` | Windows Desktop shortcut icon (**Ascent Chubby**) |
+| `ascent_shipper_checker.ico` | Alternate Windows application icon |
 | `software_banner.png` | Banner with software name |
 
 ## How to add the logo (GitHub web UI)

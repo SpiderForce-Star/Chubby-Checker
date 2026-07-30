@@ -13,7 +13,7 @@
 1. Use the official Ascent Buildings logo as the software mark.
 2. Preferred transparent PNG master: `assets/branding/ascent_logo.png`
 3. App icon sizes: 16, 32, 48, 64, 128, 256, 512 px
-4. Windows shortcut / EXE: `ascent_shipper_checker.ico`
+4. Windows Desktop shortcut: `ascent_chubby.ico` (label: **Ascent Chubby**)
 5. Always show software name near the logo in UI/docs: **Ascent Shipper Checker**
 
 ## Do I need to load the logo into GitHub?
