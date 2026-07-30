@@ -15,6 +15,7 @@ from chubby_checker.rules.accessory_rules import (
     check_rivets_for_trim,
     check_gutter_downspout,
     check_trim_lengths_against_geometry,
+    check_trim_vs_framed_openings,
     check_thermal_blocks,
     detect_panel_families,
 )
@@ -31,12 +32,24 @@ from chubby_checker.rules.bolt_rules import check_bolts
 from chubby_checker.rules.standing_seam_system import check_standing_seam_system
 from chubby_checker.rules.sheeting_fasteners import check_sheeting_fasteners
 from chubby_checker.rules.bracing_rules import check_bracing_hardware_kit
+from chubby_checker.rules.envelope_kits import (
+    check_ss_accessory_kit_incomplete,
+    check_sealant_tape_required,
+    check_gutter_strap_kit,
+    check_liner_insulation_kit,
+    check_flange_brace_clip_qty,
+    check_ridge_peak_trim,
+    check_purlin_extension_cap,
+    check_clip_to_purlin_pancake_sds,
+    check_partition_mezz_secondary,
+)
 from chubby_checker.rules.pemb_components import (
     detect_pemb_signals,
     cross_check_drawings_to_shipper,
     drawings_ascent_supplied_gutter,
     drawings_ascent_supplied_runway,
 )
+from chubby_checker.rules.seam_clip_library import identify_clip_from_text
 from chubby_checker.utils.boilerplate import (
     is_non_piece_mark,
     is_skylight_osha_boilerplate,
@@ -93,13 +106,16 @@ class DiscrepancyEngine:
         self._check_weight_rollups()
         self._check_framing_review()
         self._check_bracing_hardware()
+        self._check_flange_brace_clips()
         self._check_bolts()
         self._check_standing_seam_system()
+        self._check_ss_accessory_kit()
         self._check_sheeting_fasteners()
         self._check_panel_and_accessories()
         self._check_thermal_blocks_verified()
         self._check_clip_screw_ratio()
         self._check_closures_trim_gutter()
+        self._check_envelope_kits()
         self._check_plant_cannot_fab()
         self._check_missing_categories()
         self._check_mark_by_mark()
@@ -361,6 +377,100 @@ class DiscrepancyEngine:
         ):
             self._add(f)
         for f in check_trim_lengths_against_geometry(trim_info, self.geometry):
+            self._add(f)
+        drawings_text = self.drawings.get("raw_text") or ""
+        notes = self.drawings.get("notes") or {}
+        if isinstance(notes, dict) and notes.get("raw_text"):
+            drawings_text = drawings_text or notes.get("raw_text") or ""
+        for f in check_trim_vs_framed_openings(
+            categories,
+            drawings_text=drawings_text if isinstance(drawings_text, str) else "",
+            shipper_raw_text=raw_text or "",
+        ):
+            self._add(f)
+
+    def _drawings_text(self) -> str:
+        drawings_text = self.drawings.get("raw_text") or ""
+        notes = self.drawings.get("notes") or {}
+        if isinstance(notes, dict) and notes.get("raw_text"):
+            drawings_text = drawings_text or notes.get("raw_text") or ""
+        if isinstance(drawings_text, str):
+            return strip_skylight_osha_paragraphs(drawings_text)
+        return ""
+
+    def _check_ss_accessory_kit(self):
+        cats = self.shipper.get("categories", {})
+        raw = self.shipper.get("raw_text") or ""
+        fam = detect_panel_families(cats, raw)
+        acc = self.shipper.get("ss_accessories") or {}
+        draw = self._drawings_text()
+        has_ins = bool(
+            self.drawings.get("has_insulation") is True
+            or "insulation" in " ".join(cats.keys()).lower()
+            or "insulation" in raw.lower()
+            or int(acc.get("thermal_blocks", 0) or 0) > 0
+        )
+        clip_h = ""
+        clip = identify_clip_from_text(
+            raw + " " + " ".join(
+                f"{getattr(p, 'mark', '')} {getattr(p, 'description', '')}"
+                for pieces in cats.values() for p in pieces
+            )
+        )
+        if clip:
+            clip_h = getattr(clip, "height", "") or ""
+        # Avoid duplicate pure clip-missing if ss_clips_present already fired
+        for f in check_ss_accessory_kit_incomplete(
+            categories=cats,
+            ss_accessories=acc,
+            drawings_text=draw,
+            shipper_raw_text=raw,
+            panel_families=fam,
+            has_insulation=has_ins,
+            clip_height=clip_h,
+        ):
+            if (
+                f.get("rule") == "ss_accessory_kit_incomplete"
+                and "clips" in (f.get("actual") or "")
+                and any(d.rule in ("ss_clips_present", "clips_present") for d in self.discrepancies)
+            ):
+                # still report kit incomplete if other parts missing
+                if "missing: sliding" in (f.get("actual") or "") and "," not in (f.get("actual") or ""):
+                    continue
+            self._add(f)
+
+    def _check_flange_brace_clips(self):
+        for f in check_flange_brace_clip_qty(
+            self.shipper.get("categories", {}),
+            self.shipper.get("raw_text") or "",
+        ):
+            self._add(f)
+
+    def _check_envelope_kits(self):
+        cats = self.shipper.get("categories", {})
+        raw = self.shipper.get("raw_text") or ""
+        draw = self._drawings_text()
+        fam = detect_panel_families(cats, raw)
+        acc = self.shipper.get("ss_accessories") or {}
+        length_ft = None
+        if self.geometry:
+            length_ft = getattr(self.geometry, "length_ft", None)
+        length_ft = length_ft or self.drawings.get("length_ft")
+        for f in check_sealant_tape_required(cats, draw, raw, fam):
+            self._add(f)
+        for f in check_gutter_strap_kit(cats, draw, raw):
+            self._add(f)
+        for f in check_liner_insulation_kit(cats, draw, raw, fam):
+            self._add(f)
+        for f in check_ridge_peak_trim(
+            cats, draw, raw, float(length_ft) if length_ft else None
+        ):
+            self._add(f)
+        for f in check_purlin_extension_cap(cats, draw, raw):
+            self._add(f)
+        for f in check_clip_to_purlin_pancake_sds(cats, acc, raw, draw):
+            self._add(f)
+        for f in check_partition_mezz_secondary(cats, draw, raw):
             self._add(f)
 
     def _check_mark_by_mark(self):

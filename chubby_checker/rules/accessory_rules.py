@@ -374,11 +374,35 @@ def extract_trim_info(categories: Dict[str, list]) -> Dict[str, Any]:
             if length_ft:
                 by_type[key] = by_type.get(key, 0.0) + length_ft
 
+    count_by_type: Dict[str, int] = {}
+    for p in trim_pieces:
+        desc = f"{getattr(p, 'description', '')}".lower()
+        mark = (getattr(p, "mark", "") or "").lower()
+        key = "other_trim"
+        if "gutter" in desc or "gutter" in mark:
+            key = "gutter"
+        elif any(x in desc for x in ("downspout", "down spout")):
+            key = "downspout"
+        elif "eave" in desc:
+            key = "eave_trim"
+        elif "rake" in desc:
+            key = "rake_trim"
+        elif "corner" in desc:
+            key = "corner_trim"
+        elif "base" in desc:
+            key = "base_trim"
+        elif "ridge" in desc or "peak" in desc:
+            key = "ridge_trim"
+        elif any(x in desc for x in ("jamb", "wrap", "header")):
+            key = "opening_trim"
+        count_by_type[key] = count_by_type.get(key, 0) + int(getattr(p, "quantity", 1) or 1)
+
     return {
         "count": sum(getattr(p, "quantity", 1) for p in trim_pieces),
         "unique_marks": len({getattr(p, "mark", "") for p in trim_pieces}),
         "total_length_ft": round(total_length_ft, 1) if total_length_ft else None,
         "length_by_type": {k: round(v, 1) for k, v in by_type.items()},
+        "count_by_type": count_by_type,
         "pieces": trim_pieces,
     }
 
@@ -716,16 +740,45 @@ def check_trim_lengths_against_geometry(
 
     expectations = all_trim_expectations(geo)
     by_type = trim_info.get("length_by_type", {})
+    by_count = trim_info.get("count_by_type", {}) or {}
 
     for key, exp in expectations.items():
         if key == "downspout":
             continue
         actual = by_type.get(key)
         expected_ft = exp.get("expected_ft")
+        # Piece-count under-bill when length unknown
+        if actual is None and expected_ft and by_count.get(key, 0) == 0:
+            # Only warn for primary envelope trims when geometry known
+            if key in ("eave_trim", "rake_trim", "base_trim", "corner_trim", "ridge_trim"):
+                findings.append({
+                    "severity": "WARNING",
+                    "category": "Trim",
+                    "message": (
+                        f"No {exp['item'].replace('_', ' ')} detected on shipper; "
+                        f"geometry expects ≈{expected_ft} ft ({exp.get('formula', '')})."
+                    ),
+                    "expected": expected_ft,
+                    "actual": 0,
+                    "rule": "trim_vs_geometry",
+                })
+            continue
         if actual is None or expected_ft is None:
             continue
         cmp = compare_length(expected_ft, actual)
-        if cmp["status"] == "mismatch":
+        if cmp["status"] == "mismatch" and actual < expected_ft:
+            findings.append({
+                "severity": "WARNING",
+                "category": "Trim Length",
+                "message": (
+                    f"{exp['item']} under-billed: {actual} ft vs expected {expected_ft} ft "
+                    f"({exp.get('formula', '')}). Δ {cmp['delta_ft']} ft"
+                ),
+                "expected": expected_ft,
+                "actual": actual,
+                "rule": "trim_vs_geometry",
+            })
+        elif cmp["status"] == "mismatch":
             findings.append({
                 "severity": "WARNING",
                 "category": "Trim Length",
@@ -742,9 +795,102 @@ def check_trim_lengths_against_geometry(
                 "severity": "INFO",
                 "category": "Trim Length",
                 "message": f"{exp['item']} length ≈ {actual} ft matches geometry expectation ({expected_ft} ft).",
-                "rule": "trim_length_formula",
+                "rule": "trim_vs_geometry",
             })
 
+    return findings
+
+
+def check_trim_vs_framed_openings(
+    categories: Dict[str, list],
+    drawings_text: str = "",
+    shipper_raw_text: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    Jamb / wrap / header trim vs framed-opening count on drawings.
+    rule: trim_vs_framed_openings
+    """
+    findings: List[Dict[str, Any]] = []
+    blob = f"{drawings_text or ''}\n{shipper_raw_text or ''}".lower()
+    # Count framed openings from drawings text heuristics
+    opening_hits = 0
+    for pat in (
+        r"framed\s+opening",
+        r"\bfo-?\d",
+        r"oh\s*door",
+        r"overhead\s+door",
+        r"roll-?up\s+door",
+        r"walk\s+door",
+        r"personnel\s+door",
+        r"\bdoor\s+opening",
+    ):
+        opening_hits += len(re.findall(pat, blob, re.I))
+    # Prefer drawings-only for openings
+    draw = (drawings_text or "").lower()
+    draw_openings = 0
+    for pat in (
+        r"framed\s+opening",
+        r"\bfo-?\d",
+        r"overhead\s+door",
+        r"roll-?up",
+        r"walk\s+door",
+        r"personnel\s+door",
+    ):
+        draw_openings += len(re.findall(pat, draw, re.I))
+    openings = max(draw_openings, min(opening_hits, 50))
+    if openings <= 0:
+        return findings
+
+    jamb = 0
+    wrap = 0
+    header = 0
+    for cat, pieces in (categories or {}).items():
+        for p in pieces:
+            desc = f"{getattr(p, 'mark', '')} {getattr(p, 'description', '')} {cat}".lower()
+            q = int(getattr(p, "quantity", 0) or 0)
+            if any(k in desc for k in ("jamb", "door jamb", "opening jamb")):
+                jamb += q
+            if any(k in desc for k in ("wrap", "door wrap", "opening trim", "door trim")):
+                wrap += q
+            if any(k in desc for k in ("header", "door header", "opening header")):
+                header += q
+
+    # Soft: expect some jamb/wrap trim when openings exist
+    trim_total = jamb + wrap + header
+    if trim_total == 0:
+        findings.append({
+            "severity": "WARNING",
+            "category": "Trim",
+            "message": (
+                f"Drawings indicate ≈{openings} framed opening/door reference(s), but no "
+                "jamb / wrap / header trim was found on the original shipper."
+            ),
+            "expected": f">0 jamb/wrap trim for ~{openings} openings",
+            "actual": 0,
+            "rule": "trim_vs_framed_openings",
+        })
+    elif openings >= 2 and trim_total < openings:
+        findings.append({
+            "severity": "WARNING",
+            "category": "Trim",
+            "message": (
+                f"Framed openings ≈{openings} but jamb/wrap/header trim pieces ≈{trim_total} "
+                "(jamb={jamb}, wrap={wrap}, header={header}) — may be under-billed."
+            ),
+            "expected": f">={openings}",
+            "actual": trim_total,
+            "rule": "trim_vs_framed_openings",
+        })
+    else:
+        findings.append({
+            "severity": "INFO",
+            "category": "Trim",
+            "message": (
+                f"Opening-related trim present for ≈{openings} openings "
+                f"(jamb={jamb}, wrap={wrap}, header={header})."
+            ),
+            "rule": "trim_vs_framed_openings",
+        })
     return findings
 
 
