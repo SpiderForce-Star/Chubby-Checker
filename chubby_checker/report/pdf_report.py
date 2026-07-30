@@ -4,7 +4,8 @@ PDF Verification Report for Chubby Checker.
 Produces a printable / savable PDF named:
     CC_Checked_{JobNumber}_{YYYY-MM-DD}.pdf
 
-Includes Ascent Buildings logo (header + page corner) and diagonal watermark.
+Includes Ascent Buildings logo and product title in the header only.
+Page-wide diagonal watermarks are disabled by default.
 """
 
 from pathlib import Path
@@ -53,7 +54,7 @@ def generate_pdf_report(
     shipper_files: Optional[List[str]] = None,
     drawings_file: Optional[str] = None,
     extra_summary: Optional[Dict[str, Any]] = None,
-    watermark: bool = True,
+    watermark: bool = False,
     logo_path: Optional[str | Path] = None,
 ) -> Path:
     check_date = check_date or datetime.now()
@@ -261,15 +262,15 @@ def generate_pdf_report(
         styles["Footer"],
     ))
 
-    canvasmaker = None
+    # Page-wide diagonal watermarks / corner stamps are off by default.
+    # Status ("ERRORS FOUND" / "NO ERRORS") remains as a normal header banner above.
     if watermark:
+        # Opt-in only: page numbers without diagonal text or corner logo stamps.
         canvasmaker = make_page_canvas(
-            watermark_text=f"{COMPANY_NAME}  ·  {PRODUCT_NAME}",
             logo_path=resolved_logo,
-            status_label=status_label,
+            draw_watermark=False,
+            draw_corner_logo=False,
         )
-
-    if canvasmaker is not None:
         doc.build(story, canvasmaker=canvasmaker)
     else:
         doc.build(story)

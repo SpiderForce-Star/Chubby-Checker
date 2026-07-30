@@ -15,7 +15,7 @@ Example: `CC_Checked_25-13168_2026-07-26.pdf`
 - Statement that the shipper appears consistent with the drawings for the checks performed
 
 ### When issues exist
-- Status banner: **ERRORS FOUND**
+- Status banner (header only, not a page watermark): **ERRORS FOUND**
 - Summary counts by severity
 - Section **Errors / Discrepancies to Review** listing every CRITICAL and WARNING item with:
   - Category, rule id, message

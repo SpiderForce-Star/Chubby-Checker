@@ -2,7 +2,7 @@
 Branding assets for Chubby Checker.
 
 Resolves the official Ascent Buildings logo and product names for CLI, PDF
-reports, and watermarks.
+and PDF report headers.
 """
 
 from __future__ import annotations

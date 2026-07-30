@@ -57,7 +57,14 @@ console = Console()
     "--no-watermark",
     is_flag=True,
     default=False,
-    help="Disable diagonal watermark / corner logo on PDF pages",
+    help="Deprecated: watermarks are off by default (flag kept for compatibility)",
+)
+@click.option(
+    "--watermark",
+    "enable_watermark",
+    is_flag=True,
+    default=False,
+    help="Opt-in only: add page numbers (no diagonal text watermarks)",
 )
 @click.option(
     "--logo",
@@ -77,6 +84,7 @@ def main(
     output_dir: str = "./reports",
     no_pdf: bool = False,
     no_watermark: bool = False,
+    enable_watermark: bool = False,
     logo: Optional[str] = None,
     access_code: Optional[str] = None,
 ):
@@ -164,7 +172,7 @@ def main(
         drawings=drawings_path,
         job_number=job_number,
         output_dir=output_dir,
-        watermark=not no_watermark,
+        watermark=bool(enable_watermark) and not no_watermark,
         logo_path=logo_path,
     )
 

@@ -54,8 +54,8 @@ python tools/auto_report.py --jobs-dir ./jobs --dry-run
 # Limit to specific jobs
 python tools/auto_report.py --jobs-dir ./jobs --only 25-13168 --only 25-13059
 
-# No watermark
-python tools/auto_report.py --jobs-dir ./jobs --no-watermark
+# Watermarks are off by default (no diagonal page text)
+python tools/auto_report.py --jobs-dir ./jobs
 ```
 
 ## Programmatic API
@@ -81,4 +81,4 @@ Every successful run writes:
 CC_Checked_{JobNumber}_{YYYY-MM-DD}.pdf
 ```
 
-with Ascent logo, watermark, and NO ERRORS / ERRORS FOUND status.
+with Ascent logo in the header and NO ERRORS / ERRORS FOUND status banner (no page watermarks).

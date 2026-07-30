@@ -47,7 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-recursive", action="store_true",
                         help="Do not scan subfolders")
     parser.add_argument("--no-watermark", action="store_true",
-                        help="Disable PDF watermark / corner logo")
+                        help="Deprecated: watermarks are off by default")
+    parser.add_argument("--watermark", action="store_true",
+                        help="Opt-in only: page numbers (no diagonal text watermarks)")
     parser.add_argument("--logo", type=Path, default=None,
                         help="Override Ascent logo path")
     parser.add_argument("--access-code", default=None,
@@ -138,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             jobs_dir=jobs_dir,
             output_dir=args.output_dir,
             recursive=not args.no_recursive,
-            watermark=not args.no_watermark,
+            watermark=bool(args.watermark) and not args.no_watermark,
             logo_path=logo,
             only_jobs=args.only or None,
         )

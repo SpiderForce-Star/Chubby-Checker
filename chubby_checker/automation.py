@@ -237,7 +237,7 @@ def run_job(
     drawings: Optional[str | Path] = None,
     job_number: Optional[str] = None,
     output_dir: str | Path = "./reports",
-    watermark: bool = True,
+    watermark: bool = False,
     logo_path: Optional[str | Path] = None,
     check_date: Optional[datetime] = None,
 ) -> RunResult:
@@ -313,7 +313,7 @@ def run_batch(
     jobs_dir: str | Path,
     output_dir: str | Path = "./reports",
     recursive: bool = True,
-    watermark: bool = True,
+    watermark: bool = False,
     logo_path: Optional[str | Path] = None,
     only_jobs: Optional[Sequence[str]] = None,
 ) -> List[RunResult]:
