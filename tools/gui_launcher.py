@@ -32,7 +32,7 @@ def _find_loading_video() -> Path | None:
     return None
 
 def _show_loading_video(root) -> None:
-    """Play Loading.mp4, then return so access-code gate opens."""
+    """Play Loading.mp4 intro. Always returns so access gate can open."""
     video_path = _find_loading_video()
     state = {"done": False, "cap": None}
 
@@ -44,10 +44,6 @@ def _show_loading_video(root) -> None:
         splash.attributes("-topmost", True)
     except Exception:
         pass
-    try:
-        splash.grab_set()
-    except Exception:
-        pass
 
     disp_w, disp_h = 720, 405
     sw = splash.winfo_screenwidth()
@@ -55,6 +51,7 @@ def _show_loading_video(root) -> None:
     x = max(0, (sw - disp_w) // 2)
     y = max(0, (sh - disp_h) // 2)
     splash.geometry(f"{disp_w}x{disp_h}+{x}+{y}")
+    splash.update_idletasks()
 
     canvas_frame = Frame(splash, bg="#0d1117", width=disp_w, height=disp_h)
     canvas_frame.pack(fill=BOTH, expand=True)
@@ -65,8 +62,10 @@ def _show_loading_video(root) -> None:
         text="Chubby Checker\nLoading…", font=("Segoe UI", 16, "bold"), justify="center",
     )
     label.pack(fill=BOTH, expand=True)
-    Label(splash, text="Press Esc or click to skip", bg="#0d1117",
-          fg="#8b949e", font=("Segoe UI", 9)).place(relx=0.5, rely=0.97, anchor="s")
+    Label(
+        splash, text="Press Esc or click to skip", bg="#0d1117",
+        fg="#8b949e", font=("Segoe UI", 9),
+    ).place(relx=0.5, rely=0.97, anchor="s")
 
     def finish(event=None):
         if state["done"]:
@@ -75,10 +74,6 @@ def _show_loading_video(root) -> None:
         try:
             if state["cap"] is not None:
                 state["cap"].release()
-        except Exception:
-            pass
-        try:
-            splash.grab_release()
         except Exception:
             pass
         try:
@@ -95,7 +90,6 @@ def _show_loading_video(root) -> None:
     except Exception:
         pass
 
-    # Never block longer than 18s — always hand off to access gate
     splash.after(18000, finish)
 
     played = False
@@ -106,7 +100,7 @@ def _show_loading_video(root) -> None:
             state["cap"] = cap
             if cap.isOpened():
                 fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-                delay_ms = max(10, min(80, int(1000 / fps)))
+                delay_ms = max(15, min(66, int(1000 / max(fps, 1))))
                 photo_holder = {"img": None}
 
                 def tick():
@@ -125,8 +119,13 @@ def _show_loading_video(root) -> None:
                         nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
                         frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        ppm = f"P6 {nw} {nh} 255 ".encode("ascii") + frame.tobytes()
-                        img = __import__("tkinter").PhotoImage(data=ppm, format="PPM")
+                        try:
+                            from PIL import Image, ImageTk
+                            im = Image.fromarray(frame)
+                            img = ImageTk.PhotoImage(im)
+                        except Exception:
+                            ppm = f"P6 {nw} {nh} 255 ".encode("ascii") + frame.tobytes()
+                            img = __import__("tkinter").PhotoImage(data=ppm, format="PPM")
                         photo_holder["img"] = img
                         label.configure(image=img, text="")
                     except Exception:
@@ -139,8 +138,9 @@ def _show_loading_video(root) -> None:
 
                 played = True
                 splash.after(20, tick)
-                splash.wait_window()
-        except Exception:
+                root.wait_window(splash)
+        except Exception as exc:
+            print("[intro] video error:", exc, file=sys.stderr)
             played = False
 
     if not state["done"] and not played:
@@ -148,31 +148,103 @@ def _show_loading_video(root) -> None:
             text="Chubby Checker\nAscent Buildings",
             font=("Segoe UI", 18, "bold"), fg="#e6edf3",
         )
-        splash.after(2500, finish)
-        splash.wait_window()
+        splash.after(2000, finish)
+        root.wait_window(splash)
     elif not state["done"]:
         finish()
+        try:
+            root.wait_window(splash)
+        except Exception:
+            pass
 
-def _show_access_gate(root):
+    try:
+        root.update_idletasks()
+        root.update()
+    except Exception:
+        pass
+
+
+def _show_access_gate(root) -> bool:
+    """Password gate after intro. Returns True if unlocked."""
     granted = {"ok": False}
-    gate = Toplevel(root); gate.title("Chubby Checker - Access"); gate.resizable(False, False); gate.transient(root); gate.grab_set()
-    gate.update_idletasks(); w,h=380,180; x=(gate.winfo_screenwidth()//2)-(w//2); y=(gate.winfo_screenheight()//2)-(h//2); gate.geometry(f"{w}x{h}+{x}+{y}")
-    frame = Frame(gate, padx=20, pady=16); frame.pack(fill=BOTH, expand=True)
-    Label(frame, text="Chubby Checker", font=("Segoe UI", 14, "bold")).pack(anchor=W)
-    Label(frame, text="Enter access code to continue", fg="#555", font=("Segoe UI", 9)).pack(anchor=W, pady=(0,10))
-    code_var = StringVar(); entry = Entry(frame, textvariable=code_var, show="*", width=32, font=("Segoe UI", 11)); entry.pack(fill=X, pady=4); entry.focus_set()
-    status = Label(frame, text="", fg="#b71c1c", font=("Segoe UI", 9)); status.pack(anchor=W, pady=(2,8))
+
+    gate = Toplevel(root)
+    gate.title("Chubby Checker - Access")
+    gate.resizable(False, False)
+    gate.configure(bg="#f5f5f5")
+    try:
+        gate.transient(root)
+    except Exception:
+        pass
+
+    w, h = 400, 200
+    gate.update_idletasks()
+    x = (gate.winfo_screenwidth() // 2) - (w // 2)
+    y = (gate.winfo_screenheight() // 2) - (h // 2)
+    gate.geometry(f"{w}x{h}+{x}+{y}")
+
+    try:
+        gate.attributes("-topmost", True)
+    except Exception:
+        pass
+    gate.lift()
+    gate.deiconify()
+    try:
+        gate.focus_force()
+    except Exception:
+        pass
+
+    frame = Frame(gate, padx=24, pady=18, bg="#f5f5f5")
+    frame.pack(fill=BOTH, expand=True)
+    Label(frame, text="Chubby Checker", font=("Segoe UI", 14, "bold"), bg="#f5f5f5").pack(anchor=W)
+    Label(
+        frame, text="Enter access code to continue",
+        fg="#555", font=("Segoe UI", 9), bg="#f5f5f5",
+    ).pack(anchor=W, pady=(0, 10))
+
+    code_var = StringVar()
+    entry = Entry(frame, textvariable=code_var, show="*", width=34, font=("Segoe UI", 11))
+    entry.pack(fill=X, pady=4)
+    entry.focus_set()
+
+    status = Label(frame, text="", fg="#b71c1c", font=("Segoe UI", 9), bg="#f5f5f5")
+    status.pack(anchor=W, pady=(2, 8))
+
     def try_unlock(event=None):
         val = code_var.get().strip()
-        if not val: status.config(text="Access code required."); return
+        if not val:
+            status.config(text="Access code required.")
+            return
         info = validate_license_key(val)
-        if info.valid or val == ACCESS_CODEWORD: granted["ok"] = True; gate.destroy()
-        else: status.config(text="Invalid access code."); entry.select_range(0, END)
-    btn_row = Frame(frame); btn_row.pack(fill=X)
-    Button(btn_row, text="Unlock", command=try_unlock, width=10, bg="#1a7f37", fg="white").pack(side=LEFT)
+        if info.valid or val == ACCESS_CODEWORD:
+            granted["ok"] = True
+            try:
+                gate.attributes("-topmost", False)
+            except Exception:
+                pass
+            gate.destroy()
+        else:
+            status.config(text="Invalid access code.")
+            entry.select_range(0, END)
+            entry.focus_set()
+
+    btn_row = Frame(frame, bg="#f5f5f5")
+    btn_row.pack(fill=X)
+    Button(btn_row, text="Unlock", command=try_unlock, width=12, bg="#1a7f37", fg="white").pack(side=LEFT)
     Button(btn_row, text="Cancel", command=gate.destroy, width=10).pack(side=LEFT, padx=8)
-    entry.bind("<Return>", try_unlock); gate.protocol("WM_DELETE_WINDOW", gate.destroy)
-    root.wait_window(gate); return granted["ok"]
+    entry.bind("<Return>", try_unlock)
+    gate.protocol("WM_DELETE_WINDOW", gate.destroy)
+
+    try:
+        gate.grab_set()
+    except Exception:
+        pass
+
+    gate.update_idletasks()
+    gate.update()
+    root.wait_window(gate)
+    return granted["ok"]
+
 
 class ChubbyCheckerGUI:
     def __init__(self, root):
@@ -374,15 +446,34 @@ class ChubbyCheckerGUI:
             messagebox.showinfo("No errors", f"Job {result.job_number}\nNo discrepancies found.\n\nReport:\n{self.report_path}")
 
 def main():
-    root = Tk(); root.withdraw()
+    root = Tk()
+    root.withdraw()
     try:
-        from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1)
-    except Exception: pass
-    # 1) Intro video  2) Access code  3) Main UI
-    _show_loading_video(root)
-    if not _show_access_gate(root):
-        root.destroy(); sys.exit(0)
-    root.deiconify(); ChubbyCheckerGUI(root); root.mainloop()
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    try:
+        # 1) Intro video → 2) Access code → 3) Main UI
+        _show_loading_video(root)
+        if not _show_access_gate(root):
+            root.destroy()
+            sys.exit(0)
+        root.deiconify()
+        ChubbyCheckerGUI(root)
+        root.mainloop()
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        try:
+            messagebox.showerror("Chubby Checker", "Startup error: " + str(exc))
+        except Exception:
+            pass
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
