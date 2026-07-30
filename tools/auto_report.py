@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Automated batch PDF report generation for Ascent Shipper Checker.
+Automated batch PDF report generation for Chubby Checker.
 
 Examples:
   python tools/auto_report.py --jobs-dir ./jobs --output-dir ./reports
@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     from rich.table import Table
     from rich.panel import Panel
 
-    from chubby_checker.auth import require_access, PRODUCT_NAME, CODENAME
+    from chubby_checker.auth import require_access, PRODUCT_NAME
     from chubby_checker.branding import COMPANY_NAME, find_logo
     from chubby_checker.automation import discover_jobs, run_batch
     from chubby_checker.errors import (
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
 
     console.print(Panel.fit(
         f"[bold green]{PRODUCT_NAME}[/bold green]\n"
-        f"[dim]codename {CODENAME}  ·  {COMPANY_NAME}[/dim]\n"
+        f"[dim]{COMPANY_NAME}[/dim]\n"
         "Automated PDF Report Generation",
         border_style="green",
     ))

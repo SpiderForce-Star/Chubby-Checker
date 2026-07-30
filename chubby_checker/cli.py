@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ascent Shipper Checker (codename Chubby Checker) – CLI"""
+"""Chubby Checker – CLI"""
 
 import click
 from rich.console import Console
@@ -8,7 +8,7 @@ from rich.table import Table
 from pathlib import Path
 from typing import Tuple, Optional
 
-from chubby_checker.auth import require_access, PRODUCT_NAME, CODENAME
+from chubby_checker.auth import require_access, PRODUCT_NAME
 from chubby_checker.branding import find_logo, COMPANY_NAME
 from chubby_checker.automation import run_job, extract_job_number
 from chubby_checker.errors import (
@@ -80,13 +80,13 @@ def main(
     logo: Optional[str] = None,
     access_code: Optional[str] = None,
 ):
-    """Ascent Shipper Checker — verify Complete Shippers against Final Drawings."""
+    """Chubby Checker — verify Complete Shippers against Final Drawings."""
 
     require_access(provided=access_code)
 
     console.print(Panel.fit(
         f"[bold green]{PRODUCT_NAME}[/bold green]\n"
-        f"[dim]codename {CODENAME}  ·  {COMPANY_NAME}[/dim]\n"
+        f"[dim]{COMPANY_NAME}[/dim]\n"
         "PEMB Shipper vs Drawings Verifier  •  Automated PDF Report",
         border_style="green",
     ))
