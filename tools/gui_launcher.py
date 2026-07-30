@@ -2,10 +2,13 @@
 """Chubby Checker GUI Launcher — Windows-safe single-mainloop startup."""
 from __future__ import annotations
 import os
+import re
 import sys
 import threading
 import webbrowser
 from pathlib import Path
+from typing import Any, Callable, List, Optional, Sequence
+from urllib.parse import unquote, urlparse
 from tkinter import (
     Tk, Frame, Label, Entry, Button, Text, Scrollbar, StringVar, Toplevel,
     filedialog, messagebox, END, DISABLED, NORMAL, BOTH, X, Y, LEFT, RIGHT, W,
@@ -27,6 +30,11 @@ _DROP_OVERLAY_FG = "#0d47a1"
 _PULSE_COLORS = ("#1565c0", "#1e88e5", "#42a5f5", "#1e88e5")
 _PULSE_INTERVAL_MS = 140
 _PULSE_THICKNESS = 3
+_DND_INSTALL_HINT = "pip install tkinterdnd2"
+_DRAWINGS_NAME_HINTS = (
+    "final", "drawing", "drawings", "ab ", "permit", "construction",
+    "erection", "edgs", "edgws", "anchor bolt", "abp",
+)
 
 
 def _find_loading_video() -> Path | None:
@@ -45,11 +53,115 @@ def _log(msg: str) -> None:
     print(f"[Chubby Checker] {msg}", flush=True)
 
 
+def _create_tk_root() -> tuple[Any, bool]:
+    """
+    Prefer TkinterDnD.Tk so Windows drag-and-drop works.
+    Fall back to plain Tk() if tkinterdnd2 is missing.
+    """
+    try:
+        from tkinterdnd2 import TkinterDnD  # type: ignore
+
+        root = TkinterDnD.Tk()
+        return root, True
+    except Exception as exc:
+        _log(f"tkinterdnd2 not available ({exc}); using plain Tk (Browse only).")
+        _log(f"Install for drag-and-drop: {_DND_INSTALL_HINT}")
+        return Tk(), False
+
+
+def parse_drop_paths(
+    event_data: Any,
+    *,
+    tk_splitlist: Optional[Callable[[str], Sequence[str]]] = None,
+) -> List[Path]:
+    """
+    Parse Windows / tkinterdnd2 <<Drop>> event.data into existing PDF Paths.
+
+    Handles:
+      - {C:\\path with spaces\\file.pdf}
+      - multiple braced paths
+      - quoted paths
+      - file:/// URIs
+      - plain paths with backslashes
+    """
+    if event_data is None:
+        return []
+
+    raw = str(event_data).strip()
+    if not raw:
+        return []
+
+    tokens: List[str] = []
+    # Prefer Tcl splitlist (handles braces / spaces the way TkDnD emits them)
+    if tk_splitlist is not None:
+        try:
+            tokens = [str(t) for t in tk_splitlist(raw)]
+        except Exception:
+            tokens = []
+    if not tokens:
+        # Braced groups first, then leftover bare tokens
+        braced = re.findall(r"\{([^{}]+)\}", raw)
+        if braced:
+            tokens = braced
+            leftover = re.sub(r"\{[^{}]+\}", " ", raw).strip()
+            if leftover:
+                tokens.extend(leftover.split())
+        else:
+            # Quoted paths
+            quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', raw)
+            if quoted:
+                tokens = [a or b for a, b in quoted]
+            else:
+                tokens = raw.split()
+
+    paths: List[Path] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        s = str(tok).strip().strip("{}").strip().strip('"').strip("'")
+        if not s:
+            continue
+        # file:// URI
+        if s.lower().startswith("file:"):
+            try:
+                parsed = urlparse(s)
+                # Windows file:///C:/... or file://localhost/C:/...
+                path_part = unquote(parsed.path or "")
+                if re.match(r"^/[A-Za-z]:", path_part):
+                    path_part = path_part[1:]
+                s = path_part or unquote(s.replace("file:///", "").replace("file://", ""))
+            except Exception:
+                s = unquote(s.replace("file:///", "").replace("file://", ""))
+        s = s.replace("/", "\\") if re.match(r"^[A-Za-z]:/", s.replace("\\", "/")) else s
+        # Normalize accidental double schemes remnants
+        s = s.strip()
+        try:
+            p = Path(s)
+        except Exception:
+            continue
+        try:
+            resolved = p.expanduser()
+            if not resolved.is_file():
+                # try as-is absolute
+                if not p.is_file():
+                    continue
+                resolved = p
+            if resolved.suffix.lower() != ".pdf":
+                continue
+            key = str(resolved.resolve()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(resolved.resolve())
+        except Exception:
+            continue
+    return paths
+
+
 class AppLauncher:
     """Intro → access gate → main GUI using one Tk mainloop (Windows-safe)."""
 
     def __init__(self) -> None:
-        self.root = Tk()
+        self.root, self.dnd_capable = _create_tk_root()
         self.root.withdraw()
         self.root.title("Chubby Checker")
         try:
@@ -62,6 +174,8 @@ class AppLauncher:
         self._cap = None
         self._intro_done = False
         self._gui = None
+        if self.dnd_capable:
+            _log("Drag-and-drop root ready (TkinterDnD.Tk)")
 
     @staticmethod
     def _apply_window_icon(win) -> None:
@@ -324,39 +438,68 @@ class AppLauncher:
             self.root.focus_force()
         except Exception:
             pass
-        self._gui = ChubbyCheckerGUI(self.root)
+        self._gui = ChubbyCheckerGUI(self.root, dnd_capable=self.dnd_capable)
         _log("Main window ready")
 
 
 class ChubbyCheckerGUI:
-    def __init__(self, root):
-        self.root = root; self.root.title("Chubby Checker"); self.root.minsize(680, 560); self.root.geometry("760x620"); self.root.configure(bg=_NORMAL_BG)
-        self.shipper_paths = []; self.drawings_paths = []; self.report_path = None
-        self._drag_active = False; self._pulse_after_id = None; self._pulse_index = 0; self._last_pulse_color = None
-        self._build_ui(); self._center(); self._enable_dnd()
+    def __init__(self, root, dnd_capable: bool = False):
+        self.root = root
+        self.dnd_capable = bool(dnd_capable)
+        self.root.title("Chubby Checker")
+        self.root.minsize(680, 560)
+        self.root.geometry("760x620")
+        self.root.configure(bg=_NORMAL_BG)
+        self.shipper_paths: List[Path] = []
+        self.drawings_paths: List[Path] = []
+        self.report_path = None
+        self._drag_active = False
+        self._pulse_after_id = None
+        self._pulse_index = 0
+        self._last_pulse_color = None
+        self._dnd_enabled = False
+        self._build_ui()
+        self._center()
+        self._enable_dnd()
+
     def _build_ui(self):
         pad = {"padx": 10, "pady": 4}
-        self.main = Frame(self.root, padx=12, pady=10, bg=_NORMAL_BG); self.main.pack(fill=BOTH, expand=True)
-        header = Frame(self.main, bg=_NORMAL_BG); header.pack(fill=X, pady=(0, 6))
+        self.main = Frame(self.root, padx=12, pady=10, bg=_NORMAL_BG)
+        self.main.pack(fill=BOTH, expand=True)
+        header = Frame(self.main, bg=_NORMAL_BG)
+        header.pack(fill=X, pady=(0, 6))
         logo_path = find_logo()
         if logo_path:
             try:
                 if logo_path.suffix.lower() in {".png", ".gif"}:
                     from tkinter import PhotoImage
                     img = PhotoImage(file=str(logo_path))
-                    if img.width() > 120: img = img.subsample(max(1, img.width()//100), max(1, img.width()//100))
-                    self._logo_img = img; Label(header, image=self._logo_img, bg=_NORMAL_BG).pack(side=LEFT, padx=(0,12))
+                    if img.width() > 120:
+                        img = img.subsample(max(1, img.width() // 100), max(1, img.width() // 100))
+                    self._logo_img = img
+                    Label(header, image=self._logo_img, bg=_NORMAL_BG).pack(side=LEFT, padx=(0, 12))
                 elif logo_path.suffix.lower() in {".jpg", ".jpeg"}:
                     from PIL import Image, ImageTk
-                    pil = Image.open(logo_path); pil.thumbnail((110, 60)); self._logo_img = ImageTk.PhotoImage(pil)
-                    Label(header, image=self._logo_img, bg=_NORMAL_BG).pack(side=LEFT, padx=(0,12))
-            except Exception: pass
-        tf = Frame(header, bg=_NORMAL_BG); tf.pack(side=LEFT, fill=X, expand=True)
+                    pil = Image.open(logo_path)
+                    pil.thumbnail((110, 60))
+                    self._logo_img = ImageTk.PhotoImage(pil)
+                    Label(header, image=self._logo_img, bg=_NORMAL_BG).pack(side=LEFT, padx=(0, 12))
+            except Exception:
+                pass
+        tf = Frame(header, bg=_NORMAL_BG)
+        tf.pack(side=LEFT, fill=X, expand=True)
         Label(tf, text="Chubby Checker", font=("Segoe UI", 16, "bold"), bg=_NORMAL_BG).pack(anchor=W)
         Label(tf, text=COMPANY_NAME, font=("Segoe UI", 9), fg="#555", bg=_NORMAL_BG).pack(anchor=W)
-        self.drop_zone = Frame(self.main, bg="#fafafa", highlightbackground="#cccccc", highlightthickness=2, padx=8, pady=8)
+        self.drop_zone = Frame(
+            self.main, bg="#fafafa", highlightbackground="#cccccc",
+            highlightthickness=2, padx=8, pady=8,
+        )
         self.drop_zone.pack(fill=X, pady=(4, 8))
-        self.drop_hint = Label(self.drop_zone, text="v  Drag & drop Shipper / Drawings PDFs here  v", font=("Segoe UI", 10), fg="#666666", bg="#fafafa", pady=6)
+        self.drop_hint = Label(
+            self.drop_zone,
+            text="v  Drag & drop Shipper / Drawings PDFs here  v",
+            font=("Segoe UI", 10), fg="#666666", bg="#fafafa", pady=6,
+        )
         self.drop_hint.pack(fill=X)
         row = Frame(self.main, bg=_NORMAL_BG); row.pack(fill=X, **pad)
         Label(row, text="Shipper PDF(s)", width=14, anchor=W, bg=_NORMAL_BG).pack(side=LEFT)
@@ -387,18 +530,80 @@ class ChubbyCheckerGUI:
         sb = Scrollbar(log_frame, command=self.log.yview); self.log.configure(yscrollcommand=sb.set)
         self.log.pack(side=LEFT, fill=BOTH, expand=True); sb.pack(side=RIGHT, fill=Y)
         self._log(f"{PRODUCT_NAME} ready.\nSelect or drop Complete Shipper PDF(s) to begin.")
+
     def _center(self):
-        self.root.update_idletasks(); w,h = self.root.winfo_width(), self.root.winfo_height()
-        x = (self.root.winfo_screenwidth()//2)-(w//2); y = (self.root.winfo_screenheight()//2)-(h//2); self.root.geometry(f"+{x}+{y}")
-    def _enable_dnd(self):
+        self.root.update_idletasks()
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.root.winfo_screenheight() // 2) - (h // 2)
+        self.root.geometry(f"+{x}+{y}")
+
+    def _register_drop_target(self, widget) -> bool:
+        """Register DND_FILES + drop/drag events on a widget. Returns True on success."""
         try:
-            from tkinterdnd2 import DND_FILES
-            self.root.drop_target_register(DND_FILES); self.drop_zone.drop_target_register(DND_FILES)
-            self.root.dnd_bind("<<Drop>>", self._on_drop); self.root.dnd_bind("<<DragEnter>>", self._on_drag_enter); self.root.dnd_bind("<<DragLeave>>", self._on_drag_leave)
-            self.drop_zone.dnd_bind("<<Drop>>", self._on_drop); self.drop_zone.dnd_bind("<<DragEnter>>", self._on_drag_enter); self.drop_zone.dnd_bind("<<DragLeave>>", self._on_drag_leave)
-            self._log("Drag-and-drop enabled (with pulse animation).")
+            from tkinterdnd2 import DND_FILES  # type: ignore
+
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", self._on_drop)
+            widget.dnd_bind("<<DragEnter>>", self._on_drag_enter)
+            widget.dnd_bind("<<DragLeave>>", self._on_drag_leave)
+            try:
+                widget.dnd_bind("<<DragOver>>", self._on_drag_over)
+            except Exception:
+                pass
+            return True
+        except Exception as exc:
+            _log(f"DnD register failed on {widget!r}: {exc}")
+            return False
+
+    def _enable_dnd(self):
+        # Requires TkinterDnD.Tk root — plain Tk drop_target_register is a no-op / error
+        if not self.dnd_capable and not hasattr(self.root, "drop_target_register"):
+            self._log("Drag-and-drop disabled — root is not TkinterDnD.Tk.")
+            self._log(f"Install for drag-and-drop: {_DND_INSTALL_HINT}")
+            self._log("Browse... still works for selecting PDFs.")
+            return
+        try:
+            from tkinterdnd2 import DND_FILES  # noqa: F401  # type: ignore
+        except Exception as exc:
+            self._log(f"Drag-and-drop unavailable ({exc}).")
+            self._log(f"Install for drag-and-drop: {_DND_INSTALL_HINT}")
+            self._log("Browse... still works for selecting PDFs.")
+            return
+
+        # Register on root + drop zone + children so Windows does not swallow drops
+        targets = [self.root, self.main, self.drop_zone, self.drop_hint]
+        ok_any = False
+        for w in targets:
+            if self._register_drop_target(w):
+                ok_any = True
+        self._dnd_enabled = ok_any
+        if ok_any:
+            self._log("Drag-and-drop enabled")
+            self.drop_hint.configure(
+                text="v  Drag & drop Shipper / Drawings PDFs here (or Browse)  v"
+            )
+        else:
+            self._log("Drag-and-drop unavailable — registration failed.")
+            self._log(f"Install for drag-and-drop: {_DND_INSTALL_HINT}")
+
+    def _accept_dnd_action(self, event):
+        """Tell Windows/tkinterdnd2 we accept a copy drop when possible."""
+        try:
+            action = getattr(event, "action", None)
+            if action is not None:
+                # Prefer copy so Explorer does not move files
+                try:
+                    from tkinterdnd2 import COPY  # type: ignore
+                    event.action = COPY
+                    return COPY
+                except Exception:
+                    event.action = action
+                    return action
         except Exception:
-            self._log("Drag-and-drop unavailable - install tkinterdnd2 for full support.")
+            pass
+        return None
+
     def _set_drop_visual(self, active):
         if active == self._drag_active:
             return
@@ -406,20 +611,33 @@ class ChubbyCheckerGUI:
         if active:
             self.root.configure(bg=_DROP_BG)
             self.main.configure(bg=_DROP_BG)
-            self.drop_zone.configure(bg=_DROP_BG, highlightbackground=_DROP_BORDER, highlightthickness=_PULSE_THICKNESS)
-            self.drop_hint.configure(text="v  DROP PDFs HERE  v", fg=_DROP_OVERLAY_FG, bg=_DROP_BG, font=("Segoe UI", 11, "bold"))
+            self.drop_zone.configure(
+                bg=_DROP_BG, highlightbackground=_DROP_BORDER,
+                highlightthickness=_PULSE_THICKNESS,
+            )
+            self.drop_hint.configure(
+                text="v  DROP PDFs HERE  v",
+                fg=_DROP_OVERLAY_FG, bg=_DROP_BG, font=("Segoe UI", 11, "bold"),
+            )
             self._start_pulse()
         else:
             self._stop_pulse()
             self.root.configure(bg=_NORMAL_BG)
             self.main.configure(bg=_NORMAL_BG)
-            self.drop_zone.configure(bg="#fafafa", highlightbackground="#cccccc", highlightthickness=2)
-            self.drop_hint.configure(text="v  Drag & drop Shipper / Drawings PDFs here  v", fg="#666666", bg="#fafafa", font=("Segoe UI", 10))
+            self.drop_zone.configure(
+                bg="#fafafa", highlightbackground="#cccccc", highlightthickness=2,
+            )
+            self.drop_hint.configure(
+                text="v  Drag & drop Shipper / Drawings PDFs here (or Browse)  v",
+                fg="#666666", bg="#fafafa", font=("Segoe UI", 10),
+            )
+
     def _start_pulse(self):
         self._pulse_index = 0
         self._last_pulse_color = None
         if self._pulse_after_id is None:
             self._pulse_tick()
+
     def _stop_pulse(self):
         aid = self._pulse_after_id
         if aid is not None:
@@ -430,6 +648,7 @@ class ChubbyCheckerGUI:
             self._pulse_after_id = None
         self._pulse_index = 0
         self._last_pulse_color = None
+
     def _pulse_tick(self):
         if not self._drag_active:
             self._pulse_after_id = None
@@ -444,52 +663,143 @@ class ChubbyCheckerGUI:
                 return
         self._pulse_index += 1
         self._pulse_after_id = self.root.after(_PULSE_INTERVAL_MS, self._pulse_tick)
-    def _on_drag_enter(self, event): self._set_drop_visual(True)
-    def _on_drag_leave(self, event): self._set_drop_visual(False)
+
+    def _on_drag_enter(self, event):
+        self._set_drop_visual(True)
+        try:
+            event.widget.focus_force()
+        except Exception:
+            pass
+        return self._accept_dnd_action(event)
+
+    def _on_drag_over(self, event):
+        # Required on some Windows hosts so the drop is accepted over children
+        return self._accept_dnd_action(event)
+
+    def _on_drag_leave(self, event):
+        self._set_drop_visual(False)
+        return self._accept_dnd_action(event)
+
     def _on_drop(self, event):
         self._set_drop_visual(False)
-        self._add_dropped_files(self.root.tk.splitlist(event.data))
-    def _add_dropped_files(self, paths):
-        pdfs = [Path(p) for p in paths if str(p).lower().endswith(".pdf") and Path(p).is_file()]
-        if not pdfs: self._log("Drop ignored - only PDF files are accepted."); return
-        a_s=a_d=0
+        try:
+            data = getattr(event, "data", None)
+            splitlist = None
+            try:
+                splitlist = self.root.tk.splitlist
+            except Exception:
+                splitlist = None
+            pdfs = parse_drop_paths(data, tk_splitlist=splitlist)
+            if not pdfs:
+                preview = repr(data)[:160] if data is not None else "None"
+                self._log("Drop ignored – only PDF files are accepted")
+                _log(f"Drop parse produced no PDFs; raw={preview}")
+                return self._accept_dnd_action(event)
+            self._add_dropped_files(pdfs)
+        except Exception as exc:
+            self._log(f"Drop failed: {exc}")
+            _log(f"Drop handler error: {exc}")
+        return self._accept_dnd_action(event)
+
+    def _is_drawings_pdf(self, path: Path) -> bool:
+        name = path.name.lower()
+        return any(k in name for k in _DRAWINGS_NAME_HINTS)
+
+    def _add_dropped_files(self, paths: Sequence[Path | str]):
+        pdfs: List[Path] = []
+        for p in paths:
+            try:
+                pp = Path(p)
+            except Exception:
+                continue
+            if pp.is_file() and pp.suffix.lower() == ".pdf":
+                pdfs.append(pp.resolve())
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique: List[Path] = []
         for p in pdfs:
-            name = p.name.lower()
-            if any(k in name for k in ("final","drawing","drawings","ab ","permit","construction")):
-                if p not in self.drawings_paths: self.drawings_paths.append(p); a_d += 1
+            key = str(p).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(p)
+        if not unique:
+            self._log("Drop ignored – only PDF files are accepted")
+            return
+
+        a_s = a_d = 0
+        for p in unique:
+            if self._is_drawings_pdf(p):
+                if p not in self.drawings_paths:
+                    self.drawings_paths.append(p)
+                    a_d += 1
             else:
-                if p not in self.shipper_paths: self.shipper_paths.append(p); a_s += 1
+                if p not in self.shipper_paths:
+                    self.shipper_paths.append(p)
+                    a_s += 1
         self._refresh_file_labels()
         if a_s or a_d:
             self._log(f"Dropped: {a_s} shipper, {a_d} drawings PDF(s).")
-            if not self.job_var.get().strip() and self.shipper_paths:
-                job = extract_job_number(*self.shipper_paths)
-                if job: self.job_var.set(job); self._log(f"Detected job number: {job}")
+            if not self.job_var.get().strip():
+                candidates = list(self.shipper_paths) + list(self.drawings_paths)
+                job = extract_job_number(*candidates) if candidates else None
+                if job:
+                    self.job_var.set(job)
+                    self._log(f"Detected job number: {job}")
+        else:
+            self._log("Drop ignored – those PDFs are already listed.")
+
     def _refresh_file_labels(self):
         if self.shipper_paths:
-            n = ", ".join(p.name for p in self.shipper_paths); self.shipper_var.set(n if len(n)<90 else n[:87]+"...")
-        else: self.shipper_var.set("(none selected)")
+            n = ", ".join(p.name for p in self.shipper_paths)
+            self.shipper_var.set(n if len(n) < 90 else n[:87] + "...")
+        else:
+            self.shipper_var.set("(none selected)")
         if self.drawings_paths:
-            n = ", ".join(p.name for p in self.drawings_paths); self.drawings_var.set(n if len(n)<90 else n[:87]+"...")
-        else: self.drawings_var.set("(optional) - multi-file / phasing supported")
+            n = ", ".join(p.name for p in self.drawings_paths)
+            self.drawings_var.set(n if len(n) < 90 else n[:87] + "...")
+        else:
+            self.drawings_var.set("(optional) - multi-file / phasing supported")
+
     def _log(self, msg):
-        self.log.configure(state=NORMAL); self.log.insert(END, msg+"\n"); self.log.see(END); self.log.configure(state=DISABLED)
+        self.log.configure(state=NORMAL)
+        self.log.insert(END, msg + "\n")
+        self.log.see(END)
+        self.log.configure(state=DISABLED)
+
     def _clear_log(self):
-        self.log.configure(state=NORMAL); self.log.delete("1.0", END); self.log.configure(state=DISABLED)
+        self.log.configure(state=NORMAL)
+        self.log.delete("1.0", END)
+        self.log.configure(state=DISABLED)
+
     def _pick_shippers(self):
-        paths = filedialog.askopenfilenames(title="Select Complete Shipper PDF(s)", filetypes=[("PDF files","*.pdf"),("All files","*.*")])
-        if not paths: return
-        self.shipper_paths = [Path(p) for p in paths]; self._refresh_file_labels()
+        paths = filedialog.askopenfilenames(
+            title="Select Complete Shipper PDF(s)",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        )
+        if not paths:
+            return
+        self.shipper_paths = [Path(p) for p in paths]
+        self._refresh_file_labels()
         if not self.job_var.get().strip():
             job = extract_job_number(*self.shipper_paths)
-            if job: self.job_var.set(job); self._log(f"Detected job number: {job}")
+            if job:
+                self.job_var.set(job)
+                self._log(f"Detected job number: {job}")
+
     def _pick_drawings(self):
-        paths = filedialog.askopenfilenames(title="Select Final Drawings PDF(s)", filetypes=[("PDF files","*.pdf"),("All files","*.*")])
-        if not paths: return
-        self.drawings_paths = [Path(p) for p in paths]; self._refresh_file_labels()
+        paths = filedialog.askopenfilenames(
+            title="Select Final Drawings PDF(s)",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        )
+        if not paths:
+            return
+        self.drawings_paths = [Path(p) for p in paths]
+        self._refresh_file_labels()
         if not self.job_var.get().strip():
             job = extract_job_number(*self.drawings_paths)
-            if job: self.job_var.set(job)
+            if job:
+                self.job_var.set(job)
     def _pick_output(self):
         path = filedialog.askdirectory(title="Select output folder")
         if path: self.output_var.set(path)

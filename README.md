@@ -70,6 +70,18 @@ python -m chubby_checker \
   --job 25-13168
 ```
 
+### Desktop GUI (Ascent Chubby)
+
+```bash
+pip install -r requirements.txt   # includes tkinterdnd2 for PDF drag-and-drop
+python tools/gui_launcher.py
+# or double-click the Desktop "Ascent Chubby" shortcut (silent VBS launch)
+```
+
+- **Drag-and-drop** PDFs onto the main window / drop zone (requires `tkinterdnd2`).
+- **Browse...** always works if drag-and-drop is unavailable.
+- Access code: **Twist1960**
+
 ---
 
 ## What it checks
