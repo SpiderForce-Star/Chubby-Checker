@@ -66,7 +66,7 @@ def expected_trim_counts(
         per_eave = sticks_for_run(building_length_ft, extra_ft=1.0)
         findings.append({
             "trim": "eave_trim",
-            "rule": "Length of Eave + 1'-0" / 20', round up",
+            "rule": "Length of Eave + 1-0 / 20 ft, round up",
             **per_eave,
             "lines": eave_sides,
             "total_sticks_all_lines": per_eave["count"] * eave_sides,
@@ -75,7 +75,7 @@ def expected_trim_counts(
             g = sticks_for_run(building_length_ft, extra_ft=1.0)
             findings.append({
                 "trim": "eave_gutter",
-                "rule": "Building length + 1'-0" / 20'",
+                "rule": "Building length + 1-0 / 20 ft",
                 **g,
                 "lines": eave_sides,
                 "total_sticks_all_lines": g["count"] * eave_sides,
@@ -86,7 +86,7 @@ def expected_trim_counts(
         rake = sticks_for_run(sloped, extra_ft=1.0)
         findings.append({
             "trim": "rake_trim",
-            "rule": "Building width sloped + 1'-0" / 20'",
+            "rule": "Building width sloped + 1-0 / 20 ft",
             "sloped_width_ft": sloped,
             **rake,
             "lines": 2,

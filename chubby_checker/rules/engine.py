@@ -16,6 +16,7 @@ from chubby_checker.rules.accessory_rules import (
     check_gutter_downspout,
     check_trim_lengths_against_geometry,
     check_thermal_blocks,
+    detect_panel_families,
 )
 from chubby_checker.rules.geometry_formulas import BuildingGeometry
 from chubby_checker.rules.framing_rules import full_framing_review
@@ -135,7 +136,6 @@ class DiscrepancyEngine:
         has_ins = bool(acc.get("thermal_blocks", 0) or self.drawings.get("has_insulation", True))
         clip_key = self.shipper.get("clip_key") or self.drawings.get("clip_key")
 
-        # Build accessory text for library identification (part numbers / aliases)
         accessory_bits = [self.shipper.get("raw_text") or ""]
         for cat, pieces in (self.shipper.get("categories") or {}).items():
             if any(k in cat.lower() for k in ("standing", "ss access", "clip", "seam")):
@@ -186,13 +186,29 @@ class DiscrepancyEngine:
         panel_cats = [
             c for c in categories
             if any(k in c.lower() for k in [
-                "panel", "standing seam", "r-loc", "rloc", "pbr",
-                "7.2", "m-loc", "mloc", "pba", "roof sheet", "wall sheet",
+                "panel", "standing seam", "r-loc", "rloc", "rlocrev", "pbr",
+                "7.2", "m-loc", "mloc", "pba", "pbm", "roof sheet", "wall sheet",
+                "double lok", "double-lok", "vsr", "vsr6", "ssr",
+                "shadow rib", "fw-120", "masterline", "standard panel",
             ])
         ]
         has_panels = bool(panel_cats)
         panel_count = sum(getattr(p, "quantity", 0) for c in panel_cats for p in categories.get(c, []))
-        for f in check_closures_present(extract_closure_counts(categories, raw_text), has_panels, panel_count):
+        families = detect_panel_families(categories, raw_text)
+        cat_blob = " ".join(panel_cats).lower()
+        if any(k in cat_blob for k in ("standing seam", "vsr", "ssr", "double lok")):
+            families["standing_seam"] = True
+        if any(k in cat_blob for k in ("r-loc", "rloc", "pbr", "pba", "pbm", "7.2", "m-loc")):
+            families["exposed_fastener"] = True
+        if any(k in cat_blob for k in ("shadow rib", "fw-120", "masterline")):
+            families["concealed_metal_wall"] = True
+            families["metal_required"] = True
+        for f in check_closures_present(
+            extract_closure_counts(categories, raw_text),
+            has_panels,
+            panel_count,
+            panel_families=families,
+        ):
             self._add(f)
         trim_info = extract_trim_info(categories)
         for f in check_rivets_for_trim(extract_rivet_count(categories, raw_text), trim_info["count"]):
