@@ -24,6 +24,9 @@ from chubby_checker.rules.geometry_formulas import (
 # Domain rules:
 #   - Standing seam panels  → metal closures required
 #   - Exposed fastener      → foam closures required (R-Loc/PBR, PBA, 7.2, PBM, etc.)
+# Metal exceptions (suppress):
+#   - B-deck / structural deck only (NMBS)
+#   - IMP / Kingspan systems
 # ---------------------------------------------------------------------------
 
 CLOSURE_PATTERNS = {
@@ -156,7 +159,10 @@ def detect_panel_families(
     panel_keys: Optional[list] = None,
 ) -> Dict[str, bool]:
     """
-    Detect standing-seam vs exposed-fastener panels for closure routing.
+    Detect panel families and metal-closure exception/suppress flags.
+
+    Metal required for standing seam and certain concealed walls.
+    Suppress metal for B-deck/NMBS structural deck and IMP/Kingspan systems.
     """
     blob_parts = [raw_text or ""]
     for cat, pieces in (categories or {}).items():
@@ -187,10 +193,40 @@ def detect_panel_families(
         )
     ) or bool(re.search(r"\b(rl|rlr|rlx|pbr|pba|pbm)\b", blob, re.IGNORECASE))
 
+    has_concealed_metal_wall = any(
+        k in blob
+        for k in (
+            "shadow rib", "shadowrib", "fw-120", "fw120", "fw 120",
+            "masterline", "master line", "masterline-16", "ml16",
+        )
+    )
+
+    is_bdeck_only_context = any(
+        k in blob for k in ("b-deck", "b deck", "bdeck", "n-deck", "structural deck", "new millennium")
+    ) and not has_ss and not has_concealed_metal_wall
+
+    is_imp_context = any(
+        k in blob for k in (
+            "kingspan", "imp", "insulated metal panel", "insulated panel",
+            "awip", "metl-span", "metlspan", "nucor panel",
+        )
+    ) and not has_ss
+
+    suppress_metal = bool(is_bdeck_only_context or is_imp_context)
+    metal_required = (has_ss or has_concealed_metal_wall) and not suppress_metal
+
     return {
         "standing_seam": has_ss,
         "exposed_fastener": has_exposed,
-        "any_panel": has_ss or has_exposed or "panel" in blob,
+        "concealed_metal_wall": has_concealed_metal_wall,
+        "metal_required": metal_required,
+        "suppress_metal_closures": suppress_metal,
+        "suppress_reason": (
+            "b-deck/structural deck" if is_bdeck_only_context
+            else "IMP/Kingspan system" if is_imp_context
+            else ""
+        ),
+        "any_panel": has_ss or has_exposed or has_concealed_metal_wall or "panel" in blob,
     }
 
 
@@ -286,13 +322,22 @@ def check_closures_present(
 ) -> List[Dict[str, Any]]:
     """
     Closure requirements by panel family:
-      - Standing seam → metal closures required
-      - Exposed fastener (R-Loc/PBR, PBA, 7.2, PBM, Rev R-Loc, etc.) → foam closures required
+      - Standing seam (+ certain concealed walls) → metal closures required
+      - Exposed fastener → foam closures required
+
+    Metal-closure EXCEPTIONS (suppress metal CRITICAL):
+      - B-deck / structural deck only (NMBS)
+      - IMP / Kingspan systems
     """
     findings: List[Dict[str, Any]] = []
     families = panel_families or {}
     has_ss = bool(families.get("standing_seam"))
     has_exposed = bool(families.get("exposed_fastener"))
+    has_concealed_metal = bool(families.get("concealed_metal_wall"))
+    suppress_metal = bool(families.get("suppress_metal_closures"))
+    metal_required = bool(families.get("metal_required", has_ss or has_concealed_metal)) and not suppress_metal
+    suppress_reason = families.get("suppress_reason") or ""
+
     metal = int(closure_counts.get("metal_total", 0) or 0)
     if metal == 0:
         metal = (
@@ -308,15 +353,31 @@ def check_closures_present(
         )
     total = int(closure_counts.get("total", 0) or 0)
 
-    if has_ss:
+    if suppress_metal and (has_ss or has_concealed_metal or "deck" in suppress_reason.lower() or "imp" in suppress_reason.lower()):
+        findings.append({
+            "severity": "INFO",
+            "category": "Closures",
+            "message": (
+                f"Metal closure check suppressed ({suppress_reason or 'exception'}). "
+                "B-deck/IMP systems do not use standard standing-seam metal closures."
+            ),
+            "rule": "closures_metal_exception",
+        })
+
+    if metal_required:
+        label = "standing seam"
+        if has_concealed_metal and not has_ss:
+            label = "concealed metal-wall panel (Shadow Rib / FW-120 / MasterLine)"
+        elif has_ss and has_concealed_metal:
+            label = "standing seam / concealed metal-wall panels"
         if metal == 0:
             findings.append({
                 "severity": "CRITICAL",
                 "category": "Closures",
                 "message": (
-                    "Standing seam panels present but no metal closures detected. "
-                    "All standing seam systems require metal inside/outside closures "
-                    "(e.g. CL426/CL430, HW-426/HW-430, profile-specific HW parts)."
+                    f"{label.capitalize()} present but no metal closures detected. "
+                    "Metal inside/outside closures are required "
+                    "(e.g. CL426/CL430, HW-426/HW-430, HW-410/412, HW-422, end dams SPED16)."
                 ),
                 "expected": ">0 metal closures",
                 "actual": 0,
@@ -327,7 +388,7 @@ def check_closures_present(
                 "severity": "INFO",
                 "category": "Closures",
                 "message": (
-                    f"Metal closures found for standing seam: {metal} "
+                    f"Metal closures found for {label}: {metal} "
                     f"(inside: {closure_counts.get('metal_inside', 0)}, "
                     f"outside: {closure_counts.get('metal_outside', 0)}, "
                     f"end dams: {closure_counts.get('end_dam', 0)})."
@@ -363,7 +424,7 @@ def check_closures_present(
                 "rule": "closures_foam_exposed_fastener",
             })
 
-    if has_panels and not has_ss and not has_exposed and total == 0:
+    if has_panels and not has_ss and not has_exposed and not has_concealed_metal and total == 0:
         findings.append({
             "severity": "WARNING",
             "category": "Closures",
@@ -373,7 +434,7 @@ def check_closures_present(
             ),
             "rule": "closures_present",
         })
-    elif total > 0 and not has_ss and not has_exposed:
+    elif total > 0 and not has_ss and not has_exposed and not has_concealed_metal:
         findings.append({
             "severity": "INFO",
             "category": "Closures",
