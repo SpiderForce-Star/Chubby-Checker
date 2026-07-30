@@ -54,6 +54,33 @@ EXPOSED_PANELS = {
         "typical_screws_per_support_line": 4,
         "notes": "PBA exposed fastener profile",
     },
+    "pbm": {
+        "aliases": ["pbm", "pbm panel"],
+        "coverage": 36,
+        "rib_spacing": None,
+        "application": ["roof", "wall"],
+        "fastener_system": "exposed",
+        "typical_screws_per_support_line": 4,
+        "notes": "PBM exposed fastener profile",
+    },
+    "avp": {
+        "aliases": ["avp", "avp wall", "avp panel"],
+        "coverage": 36,
+        "rib_spacing": None,
+        "application": ["wall"],
+        "fastener_system": "exposed",
+        "typical_screws_per_support_line": 4,
+        "notes": "AVP exposed-fastener wall panel",
+    },
+    "rlr": {
+        "aliases": ["rlr", "rloc reverse", "r-loc reverse", "rlocrev", "rpbr", "rev r-loc"],
+        "coverage": 36,
+        "rib_spacing": 12,
+        "application": ["roof", "wall"],
+        "fastener_system": "exposed",
+        "typical_screws_per_support_line": 4,
+        "notes": "R-Loc reverse (paint opposite side; high rib to girt)",
+    },
 }
 
 

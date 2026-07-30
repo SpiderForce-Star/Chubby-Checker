@@ -1,5 +1,5 @@
 """
-Automated job discovery and PDF report generation for Ascent Shipper Checker.
+Automated job discovery and PDF report generation for Chubby Checker.
 
 Finds shipper + drawings pairs by job number, runs the discrepancy engine,
 and always writes CC_Checked_{Job}_{Date}.pdf reports.
@@ -232,9 +232,62 @@ def _parse_drawings(drawings_path: Optional[Path]) -> Dict[str, Any]:
     return data
 
 
+def _merge_drawings_data(parts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge multi-phase drawings parses (member tables, marks, system flags)."""
+    if not parts:
+        return {}
+    if len(parts) == 1:
+        return parts[0]
+
+    merged: Dict[str, Any] = {
+        "member_tables": {},
+        "mark_quantity_map": {},
+        "notes": {},
+        "has_crane": False,
+        "has_mezzanine": False,
+    }
+    for data in parts:
+        for cat, pieces in (data.get("member_tables") or {}).items():
+            merged["member_tables"].setdefault(cat, []).extend(pieces)
+        for mark, qty in (data.get("mark_quantity_map") or {}).items():
+            merged["mark_quantity_map"][mark] = merged["mark_quantity_map"].get(mark, 0) + int(qty or 0)
+        notes = data.get("notes") or {}
+        if isinstance(notes, dict):
+            for k, v in notes.items():
+                if k not in merged["notes"] or v:
+                    merged["notes"][k] = v
+            if notes.get("has_crane"):
+                merged["has_crane"] = True
+            if notes.get("has_mezzanine"):
+                merged["has_mezzanine"] = True
+        if data.get("has_crane"):
+            merged["has_crane"] = True
+        if data.get("has_mezzanine"):
+            merged["has_mezzanine"] = True
+        # Preserve first-seen geometry-ish scalars if present
+        for key in ("width_ft", "length_ft", "purlin_lines", "endlap_lines", "slopes", "raw_text"):
+            if key not in merged and data.get(key) is not None:
+                merged[key] = data[key]
+            elif key == "raw_text" and data.get("raw_text"):
+                prev = merged.get("raw_text") or ""
+                merged["raw_text"] = (prev + "\n" + str(data["raw_text"])).strip()
+    return merged
+
+
+def _parse_drawings_multi(drawings: Optional[str | Path | Sequence[str | Path]]) -> Dict[str, Any]:
+    if drawings is None:
+        return {}
+    if isinstance(drawings, (str, Path)):
+        return _parse_drawings(Path(drawings))
+    paths = [Path(p) for p in drawings if p]
+    if not paths:
+        return {}
+    return _merge_drawings_data([_parse_drawings(p) for p in paths])
+
+
 def run_job(
     shippers: Sequence[str | Path],
-    drawings: Optional[str | Path] = None,
+    drawings: Optional[str | Path | Sequence[str | Path]] = None,
     job_number: Optional[str] = None,
     output_dir: str | Path = "./reports",
     watermark: bool = False,
@@ -248,8 +301,23 @@ def run_job(
     job = job_number or "UNKNOWN"
     try:
         shipper_paths = require_shippers(shippers)
-        drawings_path = optional_pdf(drawings, role="drawings PDF") if drawings else None
-        job = job_number or extract_job_number(*shipper_paths, drawings_path or Path()) or "UNKNOWN"
+        drawing_paths: List[Path] = []
+        if drawings is not None:
+            if isinstance(drawings, (str, Path)):
+                one = optional_pdf(drawings, role="drawings PDF")
+                if one:
+                    drawing_paths = [one]
+            else:
+                for d in drawings:
+                    if not d:
+                        continue
+                    one = optional_pdf(d, role="drawings PDF")
+                    if one:
+                        drawing_paths.append(one)
+        drawings_path = drawing_paths[0] if drawing_paths else None
+        job = job_number or extract_job_number(
+            *shipper_paths, *(drawing_paths or [Path()])
+        ) or "UNKNOWN"
         check_date = check_date or datetime.now()
         out = require_dir(output_dir, role="output directory", create=True)
 
@@ -269,7 +337,7 @@ def run_job(
             resolved_logo = find_logo()
 
         shipper_data = _parse_shippers(shipper_paths)
-        drawings_data = _parse_drawings(drawings_path)
+        drawings_data = _parse_drawings_multi(drawing_paths if drawing_paths else None)
         engine = DiscrepancyEngine(shipper_data=shipper_data, drawings_data=drawings_data)
         findings = engine.run()
 
@@ -277,13 +345,20 @@ def run_job(
         warning = sum(1 for f in findings if getattr(f, "severity", "").upper() == "WARNING")
         info = sum(1 for f in findings if getattr(f, "severity", "").upper() == "INFO")
 
+        if len(drawing_paths) > 1:
+            drawings_label = f"{len(drawing_paths)} drawings PDF(s)"
+        elif drawings_path:
+            drawings_label = str(drawings_path)
+        else:
+            drawings_label = None
+
         report_path = generate_pdf_report(
             discrepancies=findings,
             job_number=job,
             output_dir=out,
             check_date=check_date,
             shipper_files=[str(p) for p in shipper_paths],
-            drawings_file=str(drawings_path) if drawings_path else None,
+            drawings_file=drawings_label,
             watermark=watermark,
             logo_path=resolved_logo,
         )

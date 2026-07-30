@@ -10,8 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-PRODUCT_NAME = "Chubby Checker"
+PRODUCT_NAME = "Chubby Checker"  # Official product name (not "Ascent Shipper Checker")
 COMPANY_NAME = "Ascent Buildings"
+DESKTOP_LABEL = "Ascent Chubby"
 
 # Candidate logo paths relative to repo root / install layout
 _LOGO_CANDIDATES = (

@@ -164,17 +164,23 @@ ASCENT_PANELS: Dict[str, PanelSpec] = {
 # Alias map: shipper/drawing text → catalog key
 PANEL_ALIASES = {
     "r-loc": "r-loc", "rloc": "r-loc", "r loc": "r-loc", "rl": "r-loc", "rlx": "r-loc", "rlr": "r-loc",
-    "pbr": "r-loc",  # often used interchangeably in conversation; Ascent MBS is R-Loc
+    "rloc reverse": "r-loc", "r-loc reverse": "r-loc", "rlocrev": "r-loc", "rpbr": "r-loc",
+    "pbr": "r-loc",  # often used interchangeably; Ascent MBS is R-Loc
     "m-loc": "m-loc", "mloc": "m-loc", "ml": "m-loc", "mlr": "m-loc",
     "panel-loc plus": "panel-loc-plus", "panel loc plus": "panel-loc-plus", "pp": "panel-loc-plus",
     "panel-loc": "panel-loc", "panel loc": "panel-loc", "pl": "panel-loc",
     "7.2": "7.2", "7.2 panel": "7.2",
+    "pba": "r-loc", "pbm": "r-loc",  # exposed screw-down family (map for fastener heuristics)
+    "avp": "r-loc",  # AVP wall — exposed fastener family
     "central-loc": "central-loc", "central loc": "central-loc", "cl": "central-loc", "clx": "central-loc",
     "central seam": "central-seam-plus", "central seam plus": "central-seam-plus",
     "cs": "central-seam-plus", "csx": "central-seam-plus",
     "central-snap": "central-snap", "central snap": "central-snap", "s6": "central-snap",
-    "central-span": "central-span", "vsr6": "central-span",
+    "central-span": "central-span", "vsr6": "central-span", "vsr": "central-span",
     "vs16": "central-span",  # 16\" mechanical SS family used on Ascent jobs
+    "double lok": "central-seam-plus", "double-lok": "central-seam-plus", "doublelok": "central-seam-plus",
+    "ssr": "central-seam-plus",
+    "mcelroy": "central-seam-plus", "superlok": "central-seam-plus", "battenlok": "central-seam-plus",
     "precision-loc": "precision-loc", "precision loc": "precision-loc",
 }
 

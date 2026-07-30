@@ -27,26 +27,27 @@ from chubby_checker.rules.geometry_formulas import (
 # Metal exceptions (suppress):
 #   - B-deck / structural deck only (NMBS)
 #   - IMP / Kingspan systems
+#
+# Part-number accuracy:
+#   - CL426 / HW-4xx / SPED16 / SPRAKEZ6 → metal (standing seam family)
+#   - RLCLOUTG / RLCLINGL / RLCLIN / RLCLOUT → FOAM (R-Loc screw-down), NOT metal
 # ---------------------------------------------------------------------------
 
 CLOSURE_PATTERNS = {
     "metal_inside": [
         r"metal\s+inside\s+cl",
         r"metal\s+inside\s+closure",
-        r"inside\s+clsr",
+        r"metal\s+inside",
         r"\bcl426\b",
         r"\bhw-?426\b",
         r"\bcl430\b",
         r"\bhw-?430\b",
-        r"\brlclingl\b",
-        r"\brlclin\b",
+        r"\bcl\s*426\b",
     ],
     "metal_outside": [
         r"metal\s+outside\s+cl",
         r"metal\s+outside\s+closure",
-        r"outside\s+clsr",
-        r"\brlcloutg\b",
-        r"\brlclout\b",
+        r"metal\s+outside",
         r"\bhw-?410\b",
         r"\bhw-?412\b",
         r"\bhw-?422\b",
@@ -56,13 +57,21 @@ CLOSURE_PATTERNS = {
         r"foam\s+inside",
         r"inside\s+foam",
         r"foam\s+inside\s+closure",
-        r"foam\s+cl",
+        r"foam\s+cl(?:osure|sr)?",
         r"\bfoam\s+closure\b",
+        # R-Loc / PBR foam inside part numbers (NOT metal)
+        r"\brlclingl\b",
+        r"\brlclin\b",
+        r"\brlcl-?in(?:side)?\b",
     ],
     "foam_outside": [
         r"foam\s+outside",
         r"outside\s+foam",
         r"foam\s+outside\s+closure",
+        # R-Loc / PBR foam outside part numbers (NOT metal)
+        r"\brlcloutg\b",
+        r"\brlclout\b",
+        r"\brlcl-?out(?:side)?\b",
     ],
     "end_dam": [
         r"\bsped16\b",
@@ -92,13 +101,35 @@ STANDING_SEAM_KEYWORDS = [
     "central-snap", "central snap", "central-span", "central span",
     "double lok", "double-lok", "doublelok", "ultra-dek", "ultradek",
     "vsr", "vsr6", "ssr", "mechanical seam", "snap seam",
+    "mcelroy", "mc elroy", "superlok", "super lok", "battenlok", "batten lok",
+    "18\" standing", "18 in standing", "18-inch standing",
 ]
 
 EXPOSED_FASTENER_KEYWORDS = [
     "r-loc", "rloc", "rlocrev", "rlr", "rlx", "pbr", "rpbr",
     "m-loc", "mloc", "mlr", "panel-loc", "panel loc",
     "pba", "pbm", "7.2", "seven point two",
+    "avp", "avp wall", "rloc reverse", "r-loc reverse", "rev r-loc", "rev rloc",
     "exposed fastener", "screw down", "screw-down", "through fastened",
+]
+
+CONCEALED_WALL_KEYWORDS = [
+    "shadow rib", "shadowrib", "fw-120", "fw120", "fw 120",
+    "masterline", "master line", "masterline-16", "ml16",
+]
+
+LINER_KEYWORDS = [
+    "pl121", "pl-121", "pl 121", "liner panel", "interior liner", "wall liner",
+]
+
+BDECK_KEYWORDS = [
+    "b-deck", "b deck", "bdeck", "n-deck", "structural deck",
+    "new millennium", "nmbs", "roof deck", "1.5\" deck", "1-1/2\" deck",
+]
+
+IMP_KEYWORDS = [
+    "kingspan", "imp", "insulated metal panel", "insulated panel",
+    "awip", "metl-span", "metlspan", "nucor panel",
 ]
 
 RIVET_PATTERNS = [
@@ -117,7 +148,13 @@ DOWNSPOUT_PATTERNS = [r"down\s*spout", r"downspout", r"ds-?\d", r"leader"]
 
 
 def extract_closure_counts(categories: Dict[str, list], raw_text: str = "") -> Dict[str, int]:
-    """Count closures by type. Foam takes priority when description mentions foam."""
+    """
+    Count closures by type.
+
+    Foam takes priority when description mentions foam (never count
+    "foam inside closure" as metal). R-Loc foam SKUs (RLCLOUTG/RLCLINGL)
+    classify as foam, not metal.
+    """
     counts = {k: 0 for k in CLOSURE_PATTERNS}
     counts["total"] = 0
     counts["metal_total"] = 0
@@ -132,11 +169,15 @@ def extract_closure_counts(categories: Dict[str, list], raw_text: str = "") -> D
     ordered = [(k, CLOSURE_PATTERNS[k]) for k in priority if k in CLOSURE_PATTERNS]
     ordered += [(k, v) for k, v in CLOSURE_PATTERNS.items() if k not in priority]
 
-    for cat, pieces in categories.items():
+    for cat, pieces in (categories or {}).items():
         for p in pieces:
             desc = f"{getattr(p, 'mark', '')} {getattr(p, 'description', '')} {cat}".lower()
+            mentions_foam = "foam" in desc
             matched = False
             for ctype, pats in ordered:
+                # Never assign metal_* when the line is explicitly foam
+                if mentions_foam and ctype.startswith("metal_"):
+                    continue
                 for pat in pats:
                     if re.search(pat, desc, re.IGNORECASE):
                         q = getattr(p, "quantity", 1) or 1
@@ -157,12 +198,13 @@ def detect_panel_families(
     categories: Dict[str, list],
     raw_text: str = "",
     panel_keys: Optional[list] = None,
-) -> Dict[str, bool]:
+) -> Dict[str, Any]:
     """
-    Detect panel families and metal-closure exception/suppress flags.
+    Detect panel families and closure requirement/suppress flags.
 
-    Metal required for standing seam and certain concealed walls.
-    Suppress metal for B-deck/NMBS structural deck and IMP/Kingspan systems.
+    Metal required: standing seam + certain concealed walls (Shadow Rib / FW-120 / MasterLine).
+    Foam required: exposed-fastener / screw-down (R-Loc/PBR, AVP, PBA, 7.2, PBM, RLR, …).
+    Suppress metal: pure B-deck/NMBS structural deck, IMP/Kingspan (no SS metal closures).
     """
     blob_parts = [raw_text or ""]
     for cat, pieces in (categories or {}).items():
@@ -173,60 +215,96 @@ def detect_panel_families(
         blob_parts.extend(str(k) for k in panel_keys)
     blob = " ".join(blob_parts).lower()
 
-    has_ss = any(
-        k in blob
-        for k in (
-            "standing seam", "central-loc", "central loc", "central seam",
-            "central-snap", "central snap", "central-span", "central span",
-            "double lok", "double-lok", "doublelok", "ultra-dek", "ultradek",
-            "vsr6", "vsr", "ssr", "mechanical seam", "snap seam",
-        )
-    ) or bool(re.search(r"\b(csx?|clx?|vsr6?|ssr|s6)\b", blob, re.IGNORECASE))
+    has_ss = any(k in blob for k in STANDING_SEAM_KEYWORDS) or bool(
+        re.search(r"\b(csx?|clx?|vsr6?|ssr|s6)\b", blob, re.IGNORECASE)
+    )
+    # Avoid matching "cl" inside unrelated words; MBS codes still caught by regex above
+    if not has_ss and re.search(r"\bcl\b", blob) and any(
+        k in blob for k in ("panel", "roof", "standing", "seam", "central")
+    ):
+        has_ss = True
 
-    has_exposed = any(
-        k in blob
-        for k in (
-            "r-loc", "rloc", "rlocrev", "rlr", "rlx", "pbr", "rpbr",
-            "m-loc", "mloc", "mlr", "panel-loc", "panel loc",
-            "pba", "pbm", "7.2", "exposed fastener", "screw down", "screw-down",
-            "through fastened",
-        )
-    ) or bool(re.search(r"\b(rl|rlr|rlx|pbr|pba|pbm)\b", blob, re.IGNORECASE))
-
-    has_concealed_metal_wall = any(
-        k in blob
-        for k in (
-            "shadow rib", "shadowrib", "fw-120", "fw120", "fw 120",
-            "masterline", "master line", "masterline-16", "ml16",
-        )
+    has_exposed = any(k in blob for k in EXPOSED_FASTENER_KEYWORDS) or bool(
+        re.search(r"\b(rl|rlr|rlx|pbr|rpbr|pba|pbm|avp)\b", blob, re.IGNORECASE)
     )
 
-    is_bdeck_only_context = any(
-        k in blob for k in ("b-deck", "b deck", "bdeck", "n-deck", "structural deck", "new millennium")
-    ) and not has_ss and not has_concealed_metal_wall
+    has_concealed_metal_wall = any(k in blob for k in CONCEALED_WALL_KEYWORDS)
+    has_pl121 = any(k in blob for k in ("pl121", "pl-121", "pl 121"))
+    has_liner = has_pl121 or any(k in blob for k in LINER_KEYWORDS)
+    has_double_lok = any(k in blob for k in ("double lok", "double-lok", "doublelok"))
+    has_vsr6 = any(k in blob for k in ("vsr6", "vsr 6", "central-span", "central span")) or bool(
+        re.search(r"\bvsr\b", blob)
+    )
+    has_central_loc = any(
+        k in blob for k in ("central-loc", "central loc", "central-seam", "central seam")
+    ) or bool(re.search(r"\b(cl|clx|cs|csx)\b", blob))
+    has_avp = "avp" in blob
+    has_shadow_rib = any(k in blob for k in ("shadow rib", "shadowrib"))
+    has_masterline = any(k in blob for k in ("masterline", "master line", "masterline-16", "ml16"))
+    has_fw120 = any(k in blob for k in ("fw-120", "fw120", "fw 120"))
+    has_mcelroy = any(k in blob for k in ("mcelroy", "mc elroy", "superlok", "battenlok"))
+    has_rlr = any(k in blob for k in ("rlr", "rloc reverse", "r-loc reverse", "rlocrev", "rpbr", "rev r-loc"))
+    has_pba = "pba" in blob
+    has_pbm = "pbm" in blob
+    has_72 = "7.2" in blob or "seven point two" in blob
+    has_18_ss = bool(re.search(r"\b18\s*[\"']?\s*(standing|ss|seam|coverage)\b", blob)) or (
+        has_ss and "18\"" in blob
+    )
 
-    is_imp_context = any(
-        k in blob for k in (
-            "kingspan", "imp", "insulated metal panel", "insulated panel",
-            "awip", "metl-span", "metlspan", "nucor panel",
-        )
-    ) and not has_ss
+    is_bdeck = any(k in blob for k in BDECK_KEYWORDS if k not in ("deck",)) or bool(
+        re.search(r"\b(b-?deck|n-?deck|structural\s+deck|new\s+millennium|nmbs)\b", blob)
+    )
+    # Avoid bare "imp" matching inside unrelated words (e.g. "simple")
+    is_imp = any(k in blob for k in IMP_KEYWORDS if k != "imp") or bool(
+        re.search(r"\bimps?\b", blob)
+    )
+
+    # B-deck-only: structural deck without SS / metal-wall systems that need metal closures
+    is_bdeck_only_context = is_bdeck and not has_ss and not has_concealed_metal_wall
+    # IMP context: suppress metal SS closures unless a true SS roof is also present
+    is_imp_context = is_imp and not has_ss
 
     suppress_metal = bool(is_bdeck_only_context or is_imp_context)
     metal_required = (has_ss or has_concealed_metal_wall) and not suppress_metal
+    # Foam for screw-down; not for pure B-deck / pure IMP without exposed panels
+    foam_required = has_exposed and not (is_bdeck_only_context and not has_exposed)
+    if is_imp_context and not has_exposed:
+        foam_required = False
 
     return {
         "standing_seam": has_ss,
         "exposed_fastener": has_exposed,
         "concealed_metal_wall": has_concealed_metal_wall,
         "metal_required": metal_required,
+        "foam_required": foam_required,
         "suppress_metal_closures": suppress_metal,
+        "suppress_foam_closures": bool(is_bdeck_only_context or (is_imp_context and not has_exposed)),
         "suppress_reason": (
             "b-deck/structural deck" if is_bdeck_only_context
             else "IMP/Kingspan system" if is_imp_context
             else ""
         ),
-        "any_panel": has_ss or has_exposed or has_concealed_metal_wall or "panel" in blob,
+        "bdeck": is_bdeck,
+        "imp": is_imp,
+        "double_lok": has_double_lok,
+        "vsr6": has_vsr6,
+        "central_loc": has_central_loc,
+        "avp": has_avp,
+        "pl121": has_pl121,
+        "liner": has_liner,
+        "shadow_rib": has_shadow_rib,
+        "masterline": has_masterline,
+        "fw120": has_fw120,
+        "mcelroy": has_mcelroy,
+        "rlr_reverse": has_rlr,
+        "pba": has_pba,
+        "pbm": has_pbm,
+        "panel_7_2": has_72,
+        "ss_18in": has_18_ss,
+        "any_panel": (
+            has_ss or has_exposed or has_concealed_metal_wall
+            or has_liner or is_bdeck or is_imp or "panel" in blob
+        ),
     }
 
 
@@ -318,16 +396,16 @@ def check_closures_present(
     closure_counts: Dict[str, int],
     has_panels: bool,
     panel_count: int = 0,
-    panel_families: Optional[Dict[str, bool]] = None,
+    panel_families: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Closure requirements by panel family:
-      - Standing seam (+ certain concealed walls) → metal closures required
-      - Exposed fastener → foam closures required
+      - Standing seam (+ Shadow Rib / FW-120 / MasterLine) → metal closures required
+      - Exposed fastener (R-Loc/PBR, AVP, PBA, 7.2, PBM, RLR, …) → foam required
 
     Metal-closure EXCEPTIONS (suppress metal CRITICAL):
       - B-deck / structural deck only (NMBS)
-      - IMP / Kingspan systems
+      - IMP / Kingspan systems (no SS metal closures)
     """
     findings: List[Dict[str, Any]] = []
     families = panel_families or {}
@@ -335,7 +413,9 @@ def check_closures_present(
     has_exposed = bool(families.get("exposed_fastener"))
     has_concealed_metal = bool(families.get("concealed_metal_wall"))
     suppress_metal = bool(families.get("suppress_metal_closures"))
+    suppress_foam = bool(families.get("suppress_foam_closures"))
     metal_required = bool(families.get("metal_required", has_ss or has_concealed_metal)) and not suppress_metal
+    foam_required = bool(families.get("foam_required", has_exposed)) and not suppress_foam
     suppress_reason = families.get("suppress_reason") or ""
 
     metal = int(closure_counts.get("metal_total", 0) or 0)
@@ -344,6 +424,7 @@ def check_closures_present(
             int(closure_counts.get("metal_inside", 0) or 0)
             + int(closure_counts.get("metal_outside", 0) or 0)
             + int(closure_counts.get("end_dam", 0) or 0)
+            + int(closure_counts.get("z_bird_stop", 0) or 0)
         )
     foam = int(closure_counts.get("foam_total", 0) or 0)
     if foam == 0:
@@ -353,7 +434,11 @@ def check_closures_present(
         )
     total = int(closure_counts.get("total", 0) or 0)
 
-    if suppress_metal and (has_ss or has_concealed_metal or "deck" in suppress_reason.lower() or "imp" in suppress_reason.lower()):
+    if suppress_metal and (
+        has_ss or has_concealed_metal
+        or "deck" in suppress_reason.lower()
+        or "imp" in suppress_reason.lower()
+    ):
         findings.append({
             "severity": "INFO",
             "category": "Closures",
@@ -377,7 +462,8 @@ def check_closures_present(
                 "message": (
                     f"{label.capitalize()} present but no metal closures detected. "
                     "Metal inside/outside closures are required "
-                    "(e.g. CL426/CL430, HW-426/HW-430, HW-410/412, HW-422, end dams SPED16)."
+                    "(e.g. CL426/CL430, HW-426/HW-430, HW-410/412/422/432, "
+                    "end dams SPED16, Z/bird stop SPRAKEZ6/FL-361)."
                 ),
                 "expected": ">0 metal closures",
                 "actual": 0,
@@ -391,21 +477,22 @@ def check_closures_present(
                     f"Metal closures found for {label}: {metal} "
                     f"(inside: {closure_counts.get('metal_inside', 0)}, "
                     f"outside: {closure_counts.get('metal_outside', 0)}, "
-                    f"end dams: {closure_counts.get('end_dam', 0)})."
+                    f"end dams: {closure_counts.get('end_dam', 0)}, "
+                    f"Z/bird stop: {closure_counts.get('z_bird_stop', 0)})."
                 ),
                 "actual": metal,
                 "rule": "closures_metal_standing_seam",
             })
 
-    if has_exposed:
+    if foam_required:
         if foam == 0:
             findings.append({
                 "severity": "WARNING",
                 "category": "Closures",
                 "message": (
-                    "Exposed-fastener / screw-down panels present (R-Loc/PBR, PBA, 7.2, PBM, "
-                    "Rev R-Loc, etc.) but no foam closures detected. Foam inside/outside "
-                    "closures are required for these panel types."
+                    "Exposed-fastener / screw-down panels present (R-Loc/PBR, RLR, AVP, PBA, "
+                    "7.2, PBM, etc.) but no foam closures detected. Foam inside/outside "
+                    "closures are required (e.g. RLCLOUTG, RLCLINGL)."
                 ),
                 "expected": ">0 foam closures",
                 "actual": 0,
@@ -425,15 +512,16 @@ def check_closures_present(
             })
 
     if has_panels and not has_ss and not has_exposed and not has_concealed_metal and total == 0:
-        findings.append({
-            "severity": "WARNING",
-            "category": "Closures",
-            "message": (
-                "Panels are present but no closures were detected. "
-                "Standing seam requires metal closures; screw-down panels require foam closures."
-            ),
-            "rule": "closures_present",
-        })
+        if not suppress_metal and not suppress_foam:
+            findings.append({
+                "severity": "WARNING",
+                "category": "Closures",
+                "message": (
+                    "Panels are present but no closures were detected. "
+                    "Standing seam requires metal closures; screw-down panels require foam closures."
+                ),
+                "rule": "closures_present",
+            })
     elif total > 0 and not has_ss and not has_exposed and not has_concealed_metal:
         findings.append({
             "severity": "INFO",

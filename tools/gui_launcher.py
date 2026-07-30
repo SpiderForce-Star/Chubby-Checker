@@ -500,9 +500,14 @@ class ChubbyCheckerGUI:
         if not self.shipper_paths: messagebox.showwarning("Missing shipper", "Please select at least one Complete Shipper PDF."); return
         self.run_btn.configure(state=DISABLED); self.open_btn.configure(state=DISABLED); self.report_path = None
         self._log("-"*48); self._log("Running check...")
-        kwargs = {"shippers": list(self.shipper_paths), "drawings": self.drawings_paths[0] if self.drawings_paths else None,
-                  "job_number": self.job_var.get().strip() or None, "output_dir": self.output_var.get().strip() or "./reports",
-                  "watermark": False, "logo_path": find_logo()}
+        kwargs = {
+            "shippers": list(self.shipper_paths),
+            "drawings": list(self.drawings_paths) if self.drawings_paths else None,
+            "job_number": self.job_var.get().strip() or None,
+            "output_dir": self.output_var.get().strip() or "./reports",
+            "watermark": False,
+            "logo_path": find_logo(),
+        }
         threading.Thread(target=self._run_worker, args=(kwargs,), daemon=True).start()
     def _run_worker(self, kwargs):
         try:

@@ -186,23 +186,39 @@ class DiscrepancyEngine:
         panel_cats = [
             c for c in categories
             if any(k in c.lower() for k in [
-                "panel", "standing seam", "r-loc", "rloc", "rlocrev", "pbr",
-                "7.2", "m-loc", "mloc", "pba", "pbm", "roof sheet", "wall sheet",
-                "double lok", "double-lok", "vsr", "vsr6", "ssr",
-                "shadow rib", "fw-120", "masterline", "standard panel",
+                "panel", "standing seam", "r-loc", "rloc", "rlocrev", "pbr", "rpbr",
+                "7.2", "m-loc", "mloc", "pba", "pbm", "avp", "roof sheet", "wall sheet",
+                "double lok", "double-lok", "vsr", "vsr6", "ssr", "liner", "pl121",
+                "shadow rib", "fw-120", "masterline", "standard panel", "sheeting",
+                "b-deck", "b deck", "kingspan", "imp", "deck",
             ])
         ]
-        has_panels = bool(panel_cats)
         panel_count = sum(getattr(p, "quantity", 0) for c in panel_cats for p in categories.get(c, []))
         families = detect_panel_families(categories, raw_text)
+        has_panels = bool(panel_cats) or bool(families.get("any_panel"))
         cat_blob = " ".join(panel_cats).lower()
-        if any(k in cat_blob for k in ("standing seam", "vsr", "ssr", "double lok")):
+        if any(k in cat_blob for k in (
+            "standing seam", "vsr", "ssr", "double lok", "central-loc", "central loc", "mcelroy",
+        )):
             families["standing_seam"] = True
-        if any(k in cat_blob for k in ("r-loc", "rloc", "pbr", "pba", "pbm", "7.2", "m-loc")):
+        if any(k in cat_blob for k in (
+            "r-loc", "rloc", "pbr", "rpbr", "pba", "pbm", "7.2", "m-loc", "avp", "rlr",
+        )):
             families["exposed_fastener"] = True
+            families["foam_required"] = True
         if any(k in cat_blob for k in ("shadow rib", "fw-120", "masterline")):
             families["concealed_metal_wall"] = True
-            families["metal_required"] = True
+        # Recompute metal requirement after category-name overrides
+        if families.get("suppress_metal_closures"):
+            families["metal_required"] = False
+        else:
+            families["metal_required"] = bool(
+                families.get("standing_seam") or families.get("concealed_metal_wall")
+            )
+        if families.get("suppress_foam_closures"):
+            families["foam_required"] = False
+        elif families.get("exposed_fastener"):
+            families["foam_required"] = True
         for f in check_closures_present(
             extract_closure_counts(categories, raw_text),
             has_panels,

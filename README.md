@@ -1,7 +1,8 @@
-# Ascent Shipper Checker
+# Chubby Checker
 
-**Official name:** Ascent Shipper Checker  
-**Codename:** Chubby Checker
+**Official product name:** Chubby Checker  
+**Company:** Ascent Buildings  
+**Desktop shortcut label:** Ascent Chubby
 
 Internal PEMB verification tool for **Ascent Buildings**.  
 Compares Complete Shipper PDFs against Final Drawings and produces a dated PDF report (`CC_Checked_{Job}_{Date}.pdf`).
