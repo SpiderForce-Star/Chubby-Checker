@@ -19,16 +19,84 @@ from chubby_checker.rules.geometry_formulas import (
 )
 
 # ---------------------------------------------------------------------------
-# Closure / rivet / trim patterns (unchanged core)
+# Closure / rivet / trim patterns
 # ---------------------------------------------------------------------------
+# Domain rules:
+#   - Standing seam panels  → metal closures required
+#   - Exposed fastener      → foam closures required (R-Loc/PBR, PBA, 7.2, PBM, etc.)
+# ---------------------------------------------------------------------------
+
 CLOSURE_PATTERNS = {
-    "metal_inside": [r"metal\s+inside\s+cl", r"inside\s+closure", r"cl426", r"inside\s+clsr"],
-    "metal_outside": [r"metal\s+outside\s+cl", r"outside\s+closure", r"outside\s+clsr"],
-    "foam_inside": [r"foam\s+inside", r"inside\s+foam", r"foam\s+closure"],
-    "foam_outside": [r"foam\s+outside", r"outside\s+foam"],
-    "universal_closure": [r"universal\s+closure", r"univ\.?\s+cl"],
-    "generic_closure": [r"\bclosure\b", r"\bclsr\b", r"\bcloser\b"],
+    "metal_inside": [
+        r"metal\s+inside\s+cl",
+        r"metal\s+inside\s+closure",
+        r"inside\s+clsr",
+        r"\bcl426\b",
+        r"\bhw-?426\b",
+        r"\bcl430\b",
+        r"\bhw-?430\b",
+        r"\brlclingl\b",
+        r"\brlclin\b",
+    ],
+    "metal_outside": [
+        r"metal\s+outside\s+cl",
+        r"metal\s+outside\s+closure",
+        r"outside\s+clsr",
+        r"\brlcloutg\b",
+        r"\brlclout\b",
+        r"\bhw-?410\b",
+        r"\bhw-?412\b",
+        r"\bhw-?422\b",
+        r"\bhw-?432\b",
+    ],
+    "foam_inside": [
+        r"foam\s+inside",
+        r"inside\s+foam",
+        r"foam\s+inside\s+closure",
+        r"foam\s+cl",
+        r"\bfoam\s+closure\b",
+    ],
+    "foam_outside": [
+        r"foam\s+outside",
+        r"outside\s+foam",
+        r"foam\s+outside\s+closure",
+    ],
+    "end_dam": [
+        r"\bsped16\b",
+        r"\bend\s*dam\b",
+        r"\benddam\b",
+    ],
+    "z_bird_stop": [
+        r"\bsprakez6\b",
+        r"\bfl-?361\b",
+        r"bird\s*stop",
+        r"\bz[-\s]?closure\b",
+        r"\bz[-\s]?stop\b",
+    ],
+    "universal_closure": [
+        r"universal\s+closure",
+        r"univ\.?\s+cl",
+    ],
+    "generic_closure": [
+        r"\bclosure\b",
+        r"\bclsr\b",
+        r"\bcloser\b",
+    ],
 }
+
+STANDING_SEAM_KEYWORDS = [
+    "standing seam", "central-loc", "central loc", "central seam",
+    "central-snap", "central snap", "central-span", "central span",
+    "double lok", "double-lok", "doublelok", "ultra-dek", "ultradek",
+    "vsr", "vsr6", "ssr", "mechanical seam", "snap seam",
+]
+
+EXPOSED_FASTENER_KEYWORDS = [
+    "r-loc", "rloc", "rlocrev", "rlr", "rlx", "pbr", "rpbr",
+    "m-loc", "mloc", "mlr", "panel-loc", "panel loc",
+    "pba", "pbm", "7.2", "seven point two",
+    "exposed fastener", "screw down", "screw-down", "through fastened",
+]
 
 RIVET_PATTERNS = [
     r"pop\s+rivet", r"blind\s+rivet", r"fu13", r"fu15",
@@ -46,23 +114,84 @@ DOWNSPOUT_PATTERNS = [r"down\s*spout", r"downspout", r"ds-?\d", r"leader"]
 
 
 def extract_closure_counts(categories: Dict[str, list], raw_text: str = "") -> Dict[str, int]:
+    """Count closures by type. Foam takes priority when description mentions foam."""
     counts = {k: 0 for k in CLOSURE_PATTERNS}
     counts["total"] = 0
+    counts["metal_total"] = 0
+    counts["foam_total"] = 0
+
+    priority = [
+        "foam_inside", "foam_outside",
+        "end_dam", "z_bird_stop",
+        "metal_inside", "metal_outside",
+        "universal_closure", "generic_closure",
+    ]
+    ordered = [(k, CLOSURE_PATTERNS[k]) for k in priority if k in CLOSURE_PATTERNS]
+    ordered += [(k, v) for k, v in CLOSURE_PATTERNS.items() if k not in priority]
+
     for cat, pieces in categories.items():
         for p in pieces:
             desc = f"{getattr(p, 'mark', '')} {getattr(p, 'description', '')} {cat}".lower()
             matched = False
-            for ctype, pats in CLOSURE_PATTERNS.items():
+            for ctype, pats in ordered:
                 for pat in pats:
                     if re.search(pat, desc, re.IGNORECASE):
-                        q = getattr(p, "quantity", 1)
+                        q = getattr(p, "quantity", 1) or 1
                         counts[ctype] += q
                         counts["total"] += q
+                        if ctype.startswith("metal_") or ctype in ("end_dam", "z_bird_stop"):
+                            counts["metal_total"] += q
+                        if ctype.startswith("foam_"):
+                            counts["foam_total"] += q
                         matched = True
                         break
                 if matched:
                     break
     return counts
+
+
+def detect_panel_families(
+    categories: Dict[str, list],
+    raw_text: str = "",
+    panel_keys: Optional[list] = None,
+) -> Dict[str, bool]:
+    """
+    Detect standing-seam vs exposed-fastener panels for closure routing.
+    """
+    blob_parts = [raw_text or ""]
+    for cat, pieces in (categories or {}).items():
+        blob_parts.append(str(cat))
+        for p in pieces:
+            blob_parts.append(f"{getattr(p, 'mark', '')} {getattr(p, 'description', '')}")
+    if panel_keys:
+        blob_parts.extend(str(k) for k in panel_keys)
+    blob = " ".join(blob_parts).lower()
+
+    has_ss = any(
+        k in blob
+        for k in (
+            "standing seam", "central-loc", "central loc", "central seam",
+            "central-snap", "central snap", "central-span", "central span",
+            "double lok", "double-lok", "doublelok", "ultra-dek", "ultradek",
+            "vsr6", "vsr", "ssr", "mechanical seam", "snap seam",
+        )
+    ) or bool(re.search(r"\b(csx?|clx?|vsr6?|ssr|s6)\b", blob, re.IGNORECASE))
+
+    has_exposed = any(
+        k in blob
+        for k in (
+            "r-loc", "rloc", "rlocrev", "rlr", "rlx", "pbr", "rpbr",
+            "m-loc", "mloc", "mlr", "panel-loc", "panel loc",
+            "pba", "pbm", "7.2", "exposed fastener", "screw down", "screw-down",
+            "through fastened",
+        )
+    ) or bool(re.search(r"\b(rl|rlr|rlx|pbr|pba|pbm)\b", blob, re.IGNORECASE))
+
+    return {
+        "standing_seam": has_ss,
+        "exposed_fastener": has_exposed,
+        "any_panel": has_ss or has_exposed or "panel" in blob,
+    }
 
 
 def extract_rivet_count(categories: Dict[str, list], raw_text: str = "") -> int:
@@ -96,7 +225,6 @@ def extract_trim_info(categories: Dict[str, list]) -> Dict[str, Any]:
                 length_ft = (p.length_inches / 12.0) * getattr(p, "quantity", 1)
                 total_length_ft += length_ft
 
-            # Classify for formula comparison
             key = "other_trim"
             if any(x in desc or x in mark.lower() for x in ["gutter"]):
                 key = "gutter"
@@ -150,28 +278,113 @@ def extract_gutter_downspout(categories: Dict[str, list], raw_text: str = "") ->
     }
 
 
-def check_closures_present(closure_counts: Dict[str, int], has_panels: bool, panel_count: int = 0) -> List[Dict[str, Any]]:
-    findings = []
-    total = closure_counts.get("total", 0)
-    if has_panels and total == 0:
+def check_closures_present(
+    closure_counts: Dict[str, int],
+    has_panels: bool,
+    panel_count: int = 0,
+    panel_families: Optional[Dict[str, bool]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Closure requirements by panel family:
+      - Standing seam → metal closures required
+      - Exposed fastener (R-Loc/PBR, PBA, 7.2, PBM, Rev R-Loc, etc.) → foam closures required
+    """
+    findings: List[Dict[str, Any]] = []
+    families = panel_families or {}
+    has_ss = bool(families.get("standing_seam"))
+    has_exposed = bool(families.get("exposed_fastener"))
+    metal = int(closure_counts.get("metal_total", 0) or 0)
+    if metal == 0:
+        metal = (
+            int(closure_counts.get("metal_inside", 0) or 0)
+            + int(closure_counts.get("metal_outside", 0) or 0)
+            + int(closure_counts.get("end_dam", 0) or 0)
+        )
+    foam = int(closure_counts.get("foam_total", 0) or 0)
+    if foam == 0:
+        foam = (
+            int(closure_counts.get("foam_inside", 0) or 0)
+            + int(closure_counts.get("foam_outside", 0) or 0)
+        )
+    total = int(closure_counts.get("total", 0) or 0)
+
+    if has_ss:
+        if metal == 0:
+            findings.append({
+                "severity": "CRITICAL",
+                "category": "Closures",
+                "message": (
+                    "Standing seam panels present but no metal closures detected. "
+                    "All standing seam systems require metal inside/outside closures "
+                    "(e.g. CL426/CL430, HW-426/HW-430, profile-specific HW parts)."
+                ),
+                "expected": ">0 metal closures",
+                "actual": 0,
+                "rule": "closures_metal_standing_seam",
+            })
+        else:
+            findings.append({
+                "severity": "INFO",
+                "category": "Closures",
+                "message": (
+                    f"Metal closures found for standing seam: {metal} "
+                    f"(inside: {closure_counts.get('metal_inside', 0)}, "
+                    f"outside: {closure_counts.get('metal_outside', 0)}, "
+                    f"end dams: {closure_counts.get('end_dam', 0)})."
+                ),
+                "actual": metal,
+                "rule": "closures_metal_standing_seam",
+            })
+
+    if has_exposed:
+        if foam == 0:
+            findings.append({
+                "severity": "WARNING",
+                "category": "Closures",
+                "message": (
+                    "Exposed-fastener / screw-down panels present (R-Loc/PBR, PBA, 7.2, PBM, "
+                    "Rev R-Loc, etc.) but no foam closures detected. Foam inside/outside "
+                    "closures are required for these panel types."
+                ),
+                "expected": ">0 foam closures",
+                "actual": 0,
+                "rule": "closures_foam_exposed_fastener",
+            })
+        else:
+            findings.append({
+                "severity": "INFO",
+                "category": "Closures",
+                "message": (
+                    f"Foam closures found for exposed-fastener panels: {foam} "
+                    f"(inside: {closure_counts.get('foam_inside', 0)}, "
+                    f"outside: {closure_counts.get('foam_outside', 0)})."
+                ),
+                "actual": foam,
+                "rule": "closures_foam_exposed_fastener",
+            })
+
+    if has_panels and not has_ss and not has_exposed and total == 0:
         findings.append({
             "severity": "WARNING",
             "category": "Closures",
-            "message": "Panels are present but no closures (inside/outside/foam/metal) were detected in the shipper.",
+            "message": (
+                "Panels are present but no closures were detected. "
+                "Standing seam requires metal closures; screw-down panels require foam closures."
+            ),
             "rule": "closures_present",
         })
-    elif total > 0:
+    elif total > 0 and not has_ss and not has_exposed:
         findings.append({
             "severity": "INFO",
             "category": "Closures",
             "message": (
                 f"Closures found: total {total} "
-                f"(metal inside: {closure_counts.get('metal_inside', 0)}, "
-                f"metal outside: {closure_counts.get('metal_outside', 0)}, "
-                f"foam: {closure_counts.get('foam_inside', 0) + closure_counts.get('foam_outside', 0)})"
+                f"(metal: {metal}, foam: {foam}, "
+                f"Z/bird stop: {closure_counts.get('z_bird_stop', 0)})."
             ),
             "rule": "closures_present",
         })
+
     return findings
 
 
@@ -222,7 +435,6 @@ def check_gutter_downspout(
                 "rule": "gutter_present",
             })
 
-            # Length formula check when geometry is available
             if geo and gd.get("gutter_length_ft"):
                 exp = expected_gutter_length(geo)
                 cmp = compare_length(exp["expected_ft"], gd["gutter_length_ft"])
@@ -273,7 +485,6 @@ def check_trim_lengths_against_geometry(
     trim_info: Dict[str, Any],
     geo: Optional[BuildingGeometry],
 ) -> List[Dict[str, Any]]:
-    """Compare extracted trim lengths to geometry formulas."""
     findings = []
     if not geo:
         return findings
@@ -283,7 +494,7 @@ def check_trim_lengths_against_geometry(
 
     for key, exp in expectations.items():
         if key == "downspout":
-            continue  # count-based, handled elsewhere
+            continue
         actual = by_type.get(key)
         expected_ft = exp.get("expected_ft")
         if actual is None or expected_ft is None:
@@ -318,15 +529,6 @@ def check_thermal_blocks(
     has_insulation: bool = True,
     strict: bool = True,
 ) -> List[Dict[str, Any]]:
-    """
-    Strengthened thermal block verification.
-
-    Rules:
-    - If sliding clips exist and insulation is expected, thermal blocks should be ~1:1 with clips.
-    - Ratio < 0.85 → WARNING (possible missing blocks)
-    - Ratio > 1.20 → INFO (extras / different system)
-    - Zero blocks with clips + insulation → WARNING / CRITICAL
-    """
     findings = []
     if clips <= 0:
         return findings
