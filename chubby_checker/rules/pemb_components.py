@@ -274,17 +274,59 @@ def shipper_has_screws_fasteners(categories: Optional[Dict[str, list]], raw_text
     return any(k in blob for k in ("screw", "fastener", "bolt"))
 
 
+def drawings_ascent_supplied_runway(drawings_text: str = "", drawings_signals: Optional[Dict[str, Any]] = None) -> bool:
+    """True when drawings imply Ascent-supplied runway steel (not mere owner crane notes)."""
+    blob = (drawings_text or "").lower()
+    # Owner / by others → not Ascent supply
+    if any(
+        k in blob
+        for k in (
+            "runway by others", "crane by others", "owner supplied crane",
+            "owner-supplied crane", "crane by owner", "runway by owner",
+            "by others – crane", "by others - crane",
+        )
+    ):
+        return False
+    if any(
+        k in blob
+        for k in (
+            "runway beam", "runway support", "crane runway", "ascent runway",
+            "runway brace", "crane beam",
+        )
+    ):
+        return True
+    # Generic crane mention alone is weak — only treat as Ascent if signals strong
+    sig = drawings_signals or {}
+    return bool(sig.get("crane") and ("runway" in blob or "crane beam" in blob))
+
+
+def drawings_ascent_supplied_gutter(drawings_text: str = "") -> bool:
+    """True when drawings evidence Ascent-supplied gutter/downspout (not just roof panels)."""
+    blob = (drawings_text or "").lower()
+    if any(k in blob for k in ("gutter by others", "downspout by others", "ds by others")):
+        return False
+    return any(
+        k in blob
+        for k in (
+            "eave gutter", "box gutter", "gutter", "downspout", "down spout",
+            "scupper", "conductor head",
+        )
+    )
+
+
 def cross_check_drawings_to_shipper(
     drawings_signals: Dict[str, Any],
     shipper_categories: Optional[Dict[str, list]] = None,
     shipper_raw_text: str = "",
     shipper_families: Optional[Dict[str, Any]] = None,
+    drawings_raw_text: str = "",
+    phase_count: int = 1,
 ) -> List[Dict[str, Any]]:
     """
     Produce findings when Final Drawings imply PEMB systems missing from shipper.
 
     Severity policy (research + prior Chubby behavior):
-      - Crane system missing → WARNING
+      - Crane system missing → WARNING only if Ascent-supplied runway evidence
       - Mezzanine missing → INFO (often multi-phase)
       - Standing seam on drawings, none on shipper → WARNING
       - Exposed panels on drawings, none on shipper → WARNING
@@ -297,18 +339,41 @@ def cross_check_drawings_to_shipper(
     fam = shipper_families or {}
     cats = shipper_categories or {}
     raw = shipper_raw_text or ""
+    draw_text = drawings_raw_text or ""
+    phase_note = (
+        f" (not found in any of {phase_count} shipper phases)"
+        if phase_count and phase_count > 1
+        else ""
+    )
 
-    # Crane
+    # Crane — WARNING when Ascent runway steel is clear; INFO for weak/owner crane notes
     if drawings_signals.get("crane") and not shipper_has_runway(cats, raw):
-        findings.append({
-            "severity": "WARNING",
-            "category": "Crane",
-            "message": (
-                "Final drawings reference crane/runway components, but the shipper "
-                "has no Runway/Crane category or related marks. Confirm phase or buy-out."
-            ),
-            "rule": "drawings_shipper_crane",
-        })
+        ascent_runway = drawings_ascent_supplied_runway(draw_text, drawings_signals)
+        # No drawings free-text available: keep WARNING (legacy signal-only path)
+        if not (draw_text or "").strip():
+            ascent_runway = True
+        if ascent_runway:
+            findings.append({
+                "severity": "WARNING",
+                "category": "Crane",
+                "message": (
+                    "Final drawings call out Ascent-supplied crane runway steel, but the shipper "
+                    f"has no Runway/Crane category or related marks{phase_note}. "
+                    "Confirm phase or buy-out."
+                ),
+                "rule": "drawings_shipper_crane",
+            })
+        else:
+            findings.append({
+                "severity": "INFO",
+                "category": "Crane",
+                "message": (
+                    "Drawings mention crane activity, but Ascent-supplied runway steel is not "
+                    "clearly specified (may be owner-supplied). No runway category on shipper"
+                    f"{phase_note}."
+                ),
+                "rule": "drawings_shipper_crane",
+            })
 
     # Mezzanine
     if drawings_signals.get("mezzanine") and not shipper_has_mezz(cats, raw):

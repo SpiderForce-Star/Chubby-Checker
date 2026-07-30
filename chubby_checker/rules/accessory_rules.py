@@ -471,6 +471,10 @@ def check_closures_present(
             label = "concealed metal-wall panel (Shadow Rib / FW-120 / MasterLine)"
         elif has_ss and has_concealed_metal:
             label = "standing seam / concealed metal-wall panels"
+        metal_in = int(closure_counts.get("metal_inside", 0) or 0)
+        metal_out = int(closure_counts.get("metal_outside", 0) or 0)
+        end_dam = int(closure_counts.get("end_dam", 0) or 0)
+        z_stop = int(closure_counts.get("z_bird_stop", 0) or 0)
         if metal == 0:
             findings.append({
                 "severity": "CRITICAL",
@@ -486,19 +490,53 @@ def check_closures_present(
                 "rule": "closures_metal_standing_seam",
             })
         else:
-            findings.append({
-                "severity": "INFO",
-                "category": "Closures",
-                "message": (
-                    f"Metal closures found for {label}: {metal} "
-                    f"(inside: {closure_counts.get('metal_inside', 0)}, "
-                    f"outside: {closure_counts.get('metal_outside', 0)}, "
-                    f"end dams: {closure_counts.get('end_dam', 0)}, "
-                    f"Z/bird stop: {closure_counts.get('z_bird_stop', 0)})."
-                ),
-                "actual": metal,
-                "rule": "closures_metal_standing_seam",
-            })
+            # Sparse metal: tiny total, or only inside with no outside/end dams/Z-stop
+            # (field 25-13168: 1 inside, 0 outside/end dams stayed INFO — promote WARNING)
+            sparse = False
+            sparse_reason = ""
+            if metal <= 2 and panel_count >= 10:
+                sparse = True
+                sparse_reason = (
+                    f"only {metal} metal closure(s) vs ~{panel_count} panel pieces"
+                )
+            elif metal_in > 0 and metal_out == 0 and end_dam == 0 and z_stop == 0 and metal_in <= 4:
+                sparse = True
+                sparse_reason = (
+                    f"only metal inside ({metal_in}) with no outside, end dams, or Z/bird stop"
+                )
+            elif metal_out == 0 and end_dam == 0 and metal <= 6 and (has_ss or panel_count > 0):
+                sparse = True
+                sparse_reason = (
+                    f"metal total {metal} but outside=0 and end dams=0 "
+                    f"(inside={metal_in}, Z/bird={z_stop})"
+                )
+
+            if sparse:
+                findings.append({
+                    "severity": "WARNING",
+                    "category": "Closures",
+                    "message": (
+                        f"Sparse metal closures for {label}: {sparse_reason}. "
+                        f"Counts — inside: {metal_in}, outside: {metal_out}, "
+                        f"end dams: {end_dam}, Z/bird stop: {z_stop}. "
+                        "Verify full metal closure kit (inside/outside/end dams as required)."
+                    ),
+                    "expected": "full metal closure kit",
+                    "actual": metal,
+                    "rule": "closures_metal_sparse",
+                })
+            else:
+                findings.append({
+                    "severity": "INFO",
+                    "category": "Closures",
+                    "message": (
+                        f"Metal closures found for {label}: {metal} "
+                        f"(inside: {metal_in}, outside: {metal_out}, "
+                        f"end dams: {end_dam}, Z/bird stop: {z_stop})."
+                    ),
+                    "actual": metal,
+                    "rule": "closures_metal_standing_seam",
+                })
 
     if foam_required:
         if foam == 0:
@@ -579,15 +617,26 @@ def check_gutter_downspout(
     gd: Dict[str, Any],
     has_roof_panels: bool,
     geo: Optional[BuildingGeometry] = None,
+    drawings_require_ascent_gutter: bool = False,
+    phase_count: int = 1,
 ) -> List[Dict[str, Any]]:
     findings = []
+    phase_note = (
+        f" (not found in any of {phase_count} shipper phases)"
+        if phase_count and phase_count > 1
+        else ""
+    )
 
-    if has_roof_panels:
+    # WARNING only when drawings evidence Ascent-supplied gutter/DS, not mere roof panels
+    if has_roof_panels and drawings_require_ascent_gutter:
         if not gd.get("has_gutter"):
             findings.append({
                 "severity": "WARNING",
                 "category": "Gutter",
-                "message": "Roof panels present but no gutter material detected in shipper.",
+                "message": (
+                    "Drawings indicate Ascent-supplied gutter, but no gutter material "
+                    f"was detected in the shipper{phase_note}."
+                ),
                 "rule": "gutter_present",
             })
         else:
@@ -627,7 +676,10 @@ def check_gutter_downspout(
             findings.append({
                 "severity": "WARNING",
                 "category": "Downspout",
-                "message": "Roof panels present but no downspout material detected in shipper.",
+                "message": (
+                    "Drawings indicate Ascent-supplied downspouts, but no downspout "
+                    f"material was detected in the shipper{phase_note}."
+                ),
                 "rule": "downspout_present",
             })
         else:
@@ -642,6 +694,14 @@ def check_gutter_downspout(
                 "actual": gd.get("downspout_qty"),
                 "rule": "downspout_present",
             })
+    elif has_roof_panels and gd.get("has_gutter"):
+        findings.append({
+            "severity": "INFO",
+            "category": "Gutter",
+            "message": f"Gutter pieces detected: {gd.get('gutter_qty', 0)} (drawings do not clearly require Ascent gutter).",
+            "actual": gd.get("gutter_qty"),
+            "rule": "gutter_present",
+        })
 
     return findings
 

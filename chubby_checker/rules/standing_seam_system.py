@@ -17,6 +17,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from chubby_checker.rules.seam_clip_library import (
+    EAVE_RAKE_PLATES,
     default_clip_for_coverage,
     identify_clip_from_text,
     load_seam_clip_library,
@@ -286,5 +287,133 @@ def check_standing_seam_system(
                         "actual": backup,
                         "rule": "ss_backup_vs_geometry",
                     })
+
+    # High/low clip vs eave plate / rake support consistency (field SO5 25-13168)
+    findings.extend(
+        check_clip_eave_rake_height_consistency(
+            accessory_text=accessory_text or "",
+            ss_accessories=acc,
+            clip_spec=clip_spec,
+        )
+    )
+
+    return findings
+
+
+def _blob_has_part(blob: str, part_numbers: tuple, aliases: tuple = ()) -> bool:
+    b = (blob or "").upper().replace("-", "").replace(" ", "")
+    for pn in part_numbers or ():
+        token = pn.upper().replace("-", "").replace(" ", "")
+        if token and token in b:
+            return True
+    low = (blob or "").lower()
+    for a in aliases or ():
+        if a and a.lower() in low:
+            return True
+    return False
+
+
+def detect_eave_rake_heights(blob: str, ss_accessories: Optional[Dict[str, int]] = None) -> Dict[str, bool]:
+    """Detect low/high eave plates and rake supports from text + accessory counters."""
+    acc = ss_accessories or {}
+    text = blob or ""
+    return {
+        "eave_low": (
+            _blob_has_part(text, EAVE_RAKE_PLATES["eave_low"]["part_numbers"],
+                           tuple(EAVE_RAKE_PLATES["eave_low"].get("aliases") or ()))
+            or int(acc.get("eave_plates_low", 0) or 0) > 0
+        ),
+        "eave_high": (
+            _blob_has_part(text, EAVE_RAKE_PLATES["eave_high"]["part_numbers"],
+                           tuple(EAVE_RAKE_PLATES["eave_high"].get("aliases") or ()))
+            or int(acc.get("hi_eave_plates", 0) or 0) > 0
+        ),
+        "rake_low": (
+            _blob_has_part(text, EAVE_RAKE_PLATES["rake_low"]["part_numbers"],
+                           tuple(EAVE_RAKE_PLATES["rake_low"].get("aliases") or ()))
+            or int(acc.get("rake_supports_low", 0) or 0) > 0
+        ),
+        "rake_high": (
+            _blob_has_part(text, EAVE_RAKE_PLATES["rake_high"]["part_numbers"],
+                           tuple(EAVE_RAKE_PLATES["rake_high"].get("aliases") or ()))
+            or int(acc.get("hi_rake_supports", 0) or 0) > 0
+        ),
+    }
+
+
+def check_clip_eave_rake_height_consistency(
+    accessory_text: str = "",
+    ss_accessories: Optional[Dict[str, int]] = None,
+    clip_spec=None,
+) -> List[Dict[str, Any]]:
+    """
+    WARNING when clip height (high/low) conflicts with eave plate or rake support height.
+
+    Example (25-13168 SO5): high-clip system with only low rake support (CL7710) shipped.
+    """
+    findings: List[Dict[str, Any]] = []
+    blob = accessory_text or ""
+    if clip_spec is None:
+        clip_spec = identify_clip_from_text(blob)
+    if clip_spec is None:
+        return findings
+    height = (getattr(clip_spec, "height", "") or "").lower()
+    if height not in ("high", "low"):
+        return findings
+
+    plates = detect_eave_rake_heights(blob, ss_accessories)
+    clip_label = f"{clip_spec.name} ({clip_spec.key})"
+
+    # Eave mismatch: high clips with only low eave, or low clips with only high eave
+    if height == "high" and plates["eave_low"] and not plates["eave_high"]:
+        findings.append({
+            "severity": "WARNING",
+            "category": "Standing Seam",
+            "message": (
+                f"Clip system is HIGH ({clip_label}) but only LOW eave plate "
+                f"(CL7600) evidence found — expect Hi-Eave plate CL7616 for high clips."
+            ),
+            "expected": "CL7616 hi-eave",
+            "actual": "CL7600 low eave only",
+            "rule": "ss_clip_eave_height_mismatch",
+        })
+    elif height == "low" and plates["eave_high"] and not plates["eave_low"]:
+        findings.append({
+            "severity": "WARNING",
+            "category": "Standing Seam",
+            "message": (
+                f"Clip system is LOW ({clip_label}) but only HIGH eave plate "
+                f"(CL7616) evidence found — verify eave plate height matches clips."
+            ),
+            "expected": "CL7600 low eave",
+            "actual": "CL7616 hi-eave only",
+            "rule": "ss_clip_eave_height_mismatch",
+        })
+
+    # Rake mismatch (field failure: low rake with high system)
+    if height == "high" and plates["rake_low"] and not plates["rake_high"]:
+        findings.append({
+            "severity": "WARNING",
+            "category": "Standing Seam",
+            "message": (
+                f"Clip system is HIGH ({clip_label}) but only LOW rake support "
+                f"(CL7710) evidence found — expect Hi-Rake support CL7720 (mis-fab risk)."
+            ),
+            "expected": "CL7720 hi-rake",
+            "actual": "CL7710 low rake only",
+            "rule": "ss_clip_rake_height_mismatch",
+        })
+    elif height == "low" and plates["rake_high"] and not plates["rake_low"]:
+        findings.append({
+            "severity": "WARNING",
+            "category": "Standing Seam",
+            "message": (
+                f"Clip system is LOW ({clip_label}) but only HIGH rake support "
+                f"(CL7720) evidence found — verify rake support height matches clips."
+            ),
+            "expected": "CL7710 low rake",
+            "actual": "CL7720 hi-rake only",
+            "rule": "ss_clip_rake_height_mismatch",
+        })
 
     return findings

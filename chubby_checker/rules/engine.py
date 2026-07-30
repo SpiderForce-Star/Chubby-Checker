@@ -24,14 +24,18 @@ from chubby_checker.rules.buyouts import (
     filter_buyouts_from_marks,
     check_unexpected_buyouts,
     is_buyout_text,
+    check_plant_cannot_fab_routing,
 )
 from chubby_checker.rules.weight_rules import check_weight_rollup
 from chubby_checker.rules.bolt_rules import check_bolts
 from chubby_checker.rules.standing_seam_system import check_standing_seam_system
 from chubby_checker.rules.sheeting_fasteners import check_sheeting_fasteners
+from chubby_checker.rules.bracing_rules import check_bracing_hardware_kit
 from chubby_checker.rules.pemb_components import (
     detect_pemb_signals,
     cross_check_drawings_to_shipper,
+    drawings_ascent_supplied_gutter,
+    drawings_ascent_supplied_runway,
 )
 from chubby_checker.utils.boilerplate import (
     is_non_piece_mark,
@@ -88,6 +92,7 @@ class DiscrepancyEngine:
         self._check_buyouts()
         self._check_weight_rollups()
         self._check_framing_review()
+        self._check_bracing_hardware()
         self._check_bolts()
         self._check_standing_seam_system()
         self._check_sheeting_fasteners()
@@ -95,6 +100,7 @@ class DiscrepancyEngine:
         self._check_thermal_blocks_verified()
         self._check_clip_screw_ratio()
         self._check_closures_trim_gutter()
+        self._check_plant_cannot_fab()
         self._check_missing_categories()
         self._check_mark_by_mark()
         self._check_length_match()
@@ -204,6 +210,12 @@ class DiscrepancyEngine:
         width_ft = getattr(geo, "width_ft", None) if geo else self.drawings.get("width_ft")
         length_ft = getattr(geo, "length_ft", None) if geo else self.drawings.get("length_ft")
         support_lines = self.drawings.get("purlin_lines") or self.drawings.get("support_lines")
+        drawings_text = self.drawings.get("raw_text") or ""
+        notes = self.drawings.get("notes") or {}
+        if isinstance(notes, dict) and notes.get("raw_text"):
+            drawings_text = drawings_text or notes.get("raw_text") or ""
+        if isinstance(drawings_text, str):
+            drawings_text = strip_skylight_osha_paragraphs(drawings_text)
         for f in check_sheeting_fasteners(
             categories=self.shipper.get("categories", {}),
             panel_key=self.shipper.get("exposed_panel_key") or self.drawings.get("exposed_panel_key"),
@@ -212,6 +224,34 @@ class DiscrepancyEngine:
             support_lines=int(support_lines) if support_lines else None,
             eave_endlap_lines=int(self.drawings.get("eave_endlap_lines") or 2),
             is_roof=bool(self.drawings.get("is_roof", True)),
+            drawings_text=drawings_text if isinstance(drawings_text, str) else "",
+            shipper_raw_text=self.shipper.get("raw_text") or "",
+        ):
+            self._add(f)
+
+    def _check_bracing_hardware(self):
+        drawings_text = self.drawings.get("raw_text") or ""
+        notes = self.drawings.get("notes") or {}
+        if isinstance(notes, dict) and notes.get("raw_text"):
+            drawings_text = drawings_text or notes.get("raw_text") or ""
+        for f in check_bracing_hardware_kit(
+            categories=self.shipper.get("categories", {}),
+            drawings_text=drawings_text if isinstance(drawings_text, str) else "",
+            shipper_raw_text=self.shipper.get("raw_text") or "",
+        ):
+            self._add(f)
+
+    def _check_plant_cannot_fab(self):
+        drawings_text = self.drawings.get("raw_text") or ""
+        notes = self.drawings.get("notes") or {}
+        if isinstance(notes, dict) and notes.get("raw_text"):
+            drawings_text = drawings_text or notes.get("raw_text") or ""
+        for f in check_plant_cannot_fab_routing(
+            drawings_member_tables=self.drawings.get("member_tables") or {},
+            drawings_mark_map=self.drawings.get("mark_quantity_map") or {},
+            shipper_categories=self.shipper.get("categories", {}),
+            shipper_raw_text=self.shipper.get("raw_text") or "",
+            drawings_raw_text=drawings_text if isinstance(drawings_text, str) else "",
         ):
             self._add(f)
 
@@ -304,7 +344,21 @@ class DiscrepancyEngine:
                 "pbr", "standard panel",
             )
         ) or bool(families.get("standing_seam"))
-        for f in check_gutter_downspout(gd, has_roof_panels=roofish, geo=self.geometry):
+        drawings_text = self.drawings.get("raw_text") or ""
+        notes = self.drawings.get("notes") or {}
+        if isinstance(notes, dict) and notes.get("raw_text"):
+            drawings_text = drawings_text or notes.get("raw_text") or ""
+        require_gutter = drawings_ascent_supplied_gutter(
+            drawings_text if isinstance(drawings_text, str) else ""
+        )
+        phase_count = int(self.shipper.get("phase_count") or 1)
+        for f in check_gutter_downspout(
+            gd,
+            has_roof_panels=roofish,
+            geo=self.geometry,
+            drawings_require_ascent_gutter=require_gutter,
+            phase_count=phase_count,
+        ):
             self._add(f)
         for f in check_trim_lengths_against_geometry(trim_info, self.geometry):
             self._add(f)
@@ -315,10 +369,21 @@ class DiscrepancyEngine:
             for pieces in self.drawings.get("member_tables", {}).values():
                 for p in pieces:
                     drawings_map[p.mark] = drawings_map.get(p.mark, 0) + p.quantity
+        had_raw_tables = bool(self.drawings.get("member_tables"))
         if not drawings_map:
+            why = (
+                "Member Tables were found on drawings but yielded zero usable marks "
+                "after buy-out / boilerplate filters."
+                if had_raw_tables
+                else "No Member Table marks could be extracted from drawings."
+            )
             self._add({
-                "severity": "INFO", "category": "Comparison",
-                "message": "No Member Table marks extracted from drawings – skipping mark-by-mark check.",
+                "severity": "WARNING",
+                "category": "Comparison",
+                "message": (
+                    f"{why} Mark-by-mark quantity check could not run — "
+                    "missing marks and quantity shorts will not be detected."
+                ),
                 "rule": "mark_by_mark",
             })
             return
@@ -330,6 +395,19 @@ class DiscrepancyEngine:
                     f"{cat} {getattr(p, 'description', '')} {getattr(p, 'section', '') or ''}"
                 )
         drawings_map = filter_buyouts_from_marks(drawings_map, mark_context=mark_ctx)
+        # After filters still empty → same WARNING (cannot run mark-by-mark)
+        if not drawings_map:
+            self._add({
+                "severity": "WARNING",
+                "category": "Comparison",
+                "message": (
+                    "Member Table marks were extracted but all were filtered "
+                    "(buy-outs / notes). Mark-by-mark quantity check could not run — "
+                    "missing marks and quantity shorts will not be detected."
+                ),
+                "rule": "mark_by_mark",
+            })
+            return
         shipper_map: Dict[str, int] = {}
         shipper_map_ci: Dict[str, int] = {}
         for pieces in self.shipper.get("categories", {}).values():
@@ -401,16 +479,40 @@ class DiscrepancyEngine:
             has_mezz = has_mezz or notes.get("has_mezzanine", False)
         cats = " ".join(self.shipper.get("categories", {}).keys()).upper()
         shipper_raw = (self.shipper.get("raw_text") or "").upper()
+        drawings_text = self.drawings.get("raw_text") or ""
+        if isinstance(notes, dict) and notes.get("raw_text"):
+            drawings_text = drawings_text or notes.get("raw_text") or ""
+        phase_count = int(self.shipper.get("phase_count") or 1)
+        phase_note = (
+            f" (not found in any of {phase_count} shipper phases)"
+            if phase_count > 1 else ""
+        )
         if (
             has_crane
             and "RUNWAY" not in cats and "CRANE" not in cats
             and "RUNWAY" not in shipper_raw and "CRANE" not in shipper_raw
         ):
-            self._add({
-                "severity": "WARNING", "category": "Crane",
-                "message": "Drawings reference crane/runway but no Runway/Crane category in shipper.",
-                "rule": "system_crane",
-            })
+            if drawings_ascent_supplied_runway(
+                drawings_text if isinstance(drawings_text, str) else "",
+                {"crane": True},
+            ):
+                self._add({
+                    "severity": "WARNING", "category": "Crane",
+                    "message": (
+                        "Drawings call out Ascent-supplied crane/runway steel, but no "
+                        f"Runway/Crane category in shipper{phase_note}."
+                    ),
+                    "rule": "system_crane",
+                })
+            else:
+                self._add({
+                    "severity": "INFO", "category": "Crane",
+                    "message": (
+                        "Drawings mention crane activity without clear Ascent-supplied runway "
+                        f"steel; no Runway/Crane category on shipper{phase_note}."
+                    ),
+                    "rule": "system_crane",
+                })
         if (
             has_mezz
             and "MEZZ" not in cats and "MEZZANINE" not in cats
@@ -418,7 +520,10 @@ class DiscrepancyEngine:
         ):
             self._add({
                 "severity": "INFO", "category": "Mezzanine",
-                "message": "Drawings show mezzanine. Confirm framing is in this or another phase.",
+                "message": (
+                    "Drawings show mezzanine. Confirm framing is in this or another phase"
+                    f"{phase_note}."
+                ),
                 "rule": "system_mezzanine",
             })
 
@@ -479,14 +584,22 @@ class DiscrepancyEngine:
         )
         # Avoid duplicate crane/mezz findings if system_flags already fired
         existing = {(d.rule, d.severity) for d in self.discrepancies}
+        drawings_raw = self.drawings.get("raw_text") or ""
+        if isinstance(notes, dict) and notes.get("raw_text"):
+            drawings_raw = drawings_raw or notes.get("raw_text") or ""
+        phase_count = int(self.shipper.get("phase_count") or 1)
         for f in cross_check_drawings_to_shipper(
             drawings_signals,
             shipper_categories=self.shipper.get("categories", {}),
             shipper_raw_text=shipper_raw,
             shipper_families=shipper_families,
+            drawings_raw_text=drawings_raw if isinstance(drawings_raw, str) else "",
+            phase_count=phase_count,
         ):
             # Skip redundant legacy system_crane / system_mezzanine duplicates
-            if f.get("rule") == "drawings_shipper_crane" and ("system_crane", "WARNING") in existing:
+            if f.get("rule") == "drawings_shipper_crane" and (
+                ("system_crane", "WARNING") in existing or ("system_crane", "INFO") in existing
+            ):
                 continue
             if f.get("rule") == "drawings_shipper_mezzanine" and ("system_mezzanine", "INFO") in existing:
                 continue

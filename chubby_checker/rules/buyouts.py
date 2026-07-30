@@ -286,3 +286,102 @@ def check_unexpected_buyouts(shipper_categories: Dict[str, Any]) -> List[Dict[st
         })
 
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Plant-cannot-fab angles / specials that must be routed to CS / vendor
+# (field 25-13168 SO6: 8x8x14ga angle never marked up for CS)
+# ---------------------------------------------------------------------------
+
+# L8x8, L6x6, L3x3, 8x8x14, connection angles often cannot plant-fab at Ascent
+PLANT_CANNOT_FAB_PATTERNS = (
+    re.compile(r"\bL\s*8\s*[xX×]\s*8\b", re.I),
+    re.compile(r"\bL\s*6\s*[xX×]\s*6\b", re.I),
+    re.compile(r"\bL\s*3\s*[xX×]\s*3\b", re.I),
+    re.compile(r"\b8\s*[xX×]\s*8\s*[xX×]\s*14\b", re.I),
+    re.compile(r"\b8\s*[xX×]\s*8\s*[xX×]\s*1/?4\b", re.I),
+    re.compile(r"\b8x8x14\s*ga", re.I),
+    re.compile(r"\bconnection\s+angle\b", re.I),
+    re.compile(r"\blintel\b", re.I),
+    re.compile(r"\bplant\s+cannot\s+fab", re.I),
+    re.compile(r"\bcannot\s+fab\b", re.I),
+)
+
+VENDOR_ROUTING_EVIDENCE = (
+    "central states", "cs fab", "cs shop", "vendor", "buyout", "buy-out",
+    "buy out", "outside fab", "outsource", "special order", "so to cs",
+)
+
+
+def is_plant_cannot_fab_text(text: str) -> bool:
+    t = text or ""
+    return any(p.search(t) for p in PLANT_CANNOT_FAB_PATTERNS)
+
+
+def check_plant_cannot_fab_routing(
+    drawings_member_tables: Optional[Dict[str, list]] = None,
+    drawings_mark_map: Optional[Dict[str, int]] = None,
+    shipper_categories: Optional[Dict[str, list]] = None,
+    shipper_raw_text: str = "",
+    drawings_raw_text: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    WARNING when plant-cannot-fab shapes appear on drawings but shipper has no
+    matching mark and no CS/vendor routing evidence.
+    rule: plant_cannot_fab_not_routed
+    """
+    findings: List[Dict[str, Any]] = []
+    suspects: List[tuple] = []  # (mark, qty, blob)
+
+    for cat, pieces in (drawings_member_tables or {}).items():
+        for p in pieces:
+            mark = getattr(p, "mark", "") or ""
+            desc = getattr(p, "description", "") or ""
+            section = getattr(p, "section", "") or ""
+            blob = f"{mark} {desc} {section} {cat}"
+            if is_plant_cannot_fab_text(blob):
+                suspects.append((mark, int(getattr(p, "quantity", 1) or 1), blob))
+
+    # Also scan drawings free text for angle callouts without mark
+    if drawings_raw_text and is_plant_cannot_fab_text(drawings_raw_text):
+        if not suspects:
+            suspects.append(("", 0, drawings_raw_text[:200]))
+
+    if not suspects:
+        return findings
+
+    ship_marks = set()
+    ship_blob_parts = [shipper_raw_text or ""]
+    for cat, pieces in (shipper_categories or {}).items():
+        ship_blob_parts.append(str(cat))
+        for p in pieces:
+            ship_marks.add(str(getattr(p, "mark", "") or "").upper())
+            ship_blob_parts.append(f"{getattr(p, 'mark', '')} {getattr(p, 'description', '')}")
+    ship_blob = " ".join(ship_blob_parts).lower()
+    has_routing = any(k in ship_blob for k in VENDOR_ROUTING_EVIDENCE)
+
+    for mark, qty, blob in suspects[:15]:
+        mark_u = (mark or "").upper()
+        on_shipper = bool(mark_u and mark_u in ship_marks)
+        if on_shipper or has_routing:
+            continue
+        # Also treat presence of matching angle text on shipper as OK
+        if mark and is_plant_cannot_fab_text(ship_blob) and mark_u and mark_u[:4] in ship_blob.upper():
+            continue
+        findings.append({
+            "severity": "WARNING",
+            "category": "Buy-out / Vendor",
+            "message": (
+                f"Plant-cannot-fab shape indicated on drawings"
+                f"{f' (mark {mark}, qty {qty})' if mark else ''} "
+                f"— e.g. heavy angle / special lintel — but no matching shipper mark "
+                "and no CS/vendor routing evidence. Mark up for Central States / outside fab."
+            ),
+            "expected": "CS/vendor routing or shipper mark",
+            "actual": "not routed",
+            "mark": mark or "",
+            "rule": "plant_cannot_fab_not_routed",
+        })
+        break  # one WARNING is enough per run
+
+    return findings
