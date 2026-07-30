@@ -263,6 +263,13 @@ def check_unexpected_buyouts(shipper_categories: Dict[str, Any]) -> List[Dict[st
                 f"IMPs (Kingspan / AWIP / Nucor etc.) are buy-outs."
             )
             severity = "WARNING"
+        elif any(k in cat.lower() for k in ("skylight", "sky light")):
+            # Units are buy-outs; do not restate OSHA/safety language (erection manuals)
+            msg = (
+                f"Category '{cat}' (qty {total_qty}) appears in the shipper. "
+                f"Skylight units are buy-outs; safety notes are covered in erection manuals."
+            )
+            severity = "INFO"
         else:
             msg = (
                 f"Category '{cat}' (qty {total_qty}) is a standard Ascent buy-out "

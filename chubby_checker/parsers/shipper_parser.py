@@ -16,6 +16,7 @@ import re
 import pdfplumber
 from chubby_checker.models.piece import Piece
 from chubby_checker.utils.length import parse_length_to_inches
+from chubby_checker.utils.boilerplate import is_non_piece_mark, is_skylight_osha_boilerplate
 
 # Official Ascent / Central States sliding & floating clip part numbers
 SLIDING_CLIP_PARTS = (
@@ -105,6 +106,9 @@ class ShipperParser:
                     continue
 
                 desc = str(row[col_map.get("desc", 2)] or "").strip()
+                # Skip OSHA skylight / safety note paragraphs (in erection manuals already)
+                if is_non_piece_mark(mark, desc) or is_skylight_osha_boilerplate(f"{mark} {desc}"):
+                    continue
                 length = str(row[col_map.get("length", -1)] or "").strip() if "length" in col_map else None
                 length_inches = parse_length_to_inches(length) if length else None
 

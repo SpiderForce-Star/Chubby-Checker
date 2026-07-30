@@ -15,6 +15,11 @@ import re
 import pdfplumber
 from chubby_checker.models.piece import Piece
 from chubby_checker.rules.pemb_components import detect_pemb_signals
+from chubby_checker.utils.boilerplate import (
+    is_non_piece_mark,
+    is_skylight_osha_boilerplate,
+    strip_skylight_osha_paragraphs,
+)
 
 
 def _parse_length_to_inches(length_str: str) -> Optional[float]:
@@ -253,6 +258,13 @@ class DrawingsParser:
         if not mark or len(mark) < 2:
             return None
 
+        part = get("part") or get("desc")
+        # Drop erection-note / OSHA skylight paragraphs mis-read as marks
+        if is_non_piece_mark(mark, part or ""):
+            return None
+        if is_skylight_osha_boilerplate(f"{mark} {part or ''}"):
+            return None
+
         # Quantity
         qty = 1
         qty_str = get("qty")
@@ -260,7 +272,6 @@ class DrawingsParser:
         if m:
             qty = int(m.group(1))
 
-        part = get("part") or get("desc")
         length_str = get("length")
         length_inches = _parse_length_to_inches(length_str) if length_str else None
 
@@ -323,7 +334,8 @@ class DrawingsParser:
     # Public helpers used by the engine / CLI
     # ------------------------------------------------------------------
     def get_notes(self) -> Dict[str, Any]:
-        raw_text = "\n".join(self.raw_pages)
+        # Strip skylight OSHA / fall-protection boilerplate (lives in erection manuals)
+        raw_text = strip_skylight_osha_paragraphs("\n".join(self.raw_pages))
         pemb = detect_pemb_signals(raw_text=raw_text)
         return {
             "notes": self.notes,

@@ -33,6 +33,11 @@ from chubby_checker.rules.pemb_components import (
     detect_pemb_signals,
     cross_check_drawings_to_shipper,
 )
+from chubby_checker.utils.boilerplate import (
+    is_non_piece_mark,
+    is_skylight_osha_boilerplate,
+    strip_skylight_osha_paragraphs,
+)
 
 
 @dataclass
@@ -61,13 +66,20 @@ class DiscrepancyEngine:
         self.discrepancies: List[Discrepancy] = []
 
     def _add(self, finding: Dict[str, Any]):
+        msg = finding.get("message", "") or ""
+        mark = finding.get("mark", "") or ""
+        # Never surface skylight OSHA / fall-protection notes (erection manuals cover these)
+        if is_skylight_osha_boilerplate(f"{msg} {mark}"):
+            return
+        if mark and is_non_piece_mark(mark, msg) and is_skylight_osha_boilerplate(msg):
+            return
         payload = {
             "severity": finding.get("severity", "INFO"),
             "category": finding.get("category", "General"),
-            "message": finding.get("message", ""),
+            "message": msg,
             "expected": finding.get("expected"),
             "actual": finding.get("actual"),
-            "mark": finding.get("mark", "") or "",
+            "mark": mark,
             "rule": finding.get("rule", "") or "",
         }
         self.discrepancies.append(Discrepancy(**payload))
@@ -117,6 +129,8 @@ class DiscrepancyEngine:
         drawings_text = self.drawings.get("raw_text") or self.drawings.get("notes_text") or ""
         if isinstance(self.drawings.get("notes"), dict):
             drawings_text = drawings_text or str(self.drawings.get("notes"))
+        if isinstance(drawings_text, str):
+            drawings_text = strip_skylight_osha_paragraphs(drawings_text)
         for f in check_bolts(
             self.shipper.get("categories", {}),
             drawings_text=drawings_text if isinstance(drawings_text, str) else "",
@@ -332,6 +346,9 @@ class DiscrepancyEngine:
         }
         for mark, expected_qty in drawings_map.items():
             if mark in framing_missing:
+                continue
+            ctx = mark_ctx.get(mark, "")
+            if is_non_piece_mark(mark, ctx) or is_skylight_osha_boilerplate(f"{mark} {ctx}"):
                 continue
             actual_qty = shipper_map.get(mark, 0) or shipper_map_ci.get(str(mark).upper(), 0)
             if actual_qty == 0:
