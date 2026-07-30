@@ -84,9 +84,11 @@ def classify_mark(mark: str, description: str = "") -> Tuple[str, str]:
     d = (description or "").upper()
     combined = f"{m} {d}"
 
-    # Primary – explicit prefixes first
+    # Primary – require prefix + digit/separator (avoid COL→COLD, SC→SCREW)
     for prefix, label in PRIMARY_PREFIXES.items():
-        if m.startswith(prefix) or re.match(rf"^{prefix}\d", m):
+        if re.match(rf"^{re.escape(prefix)}(?:\d|[-_])", m):
+            return "primary", label
+        if len(prefix) >= 2 and m == prefix:
             return "primary", label
 
     if any(k in combined for k in ["RIGID FRAME", "MAIN FRAME", "PRIMARY FRAME", "ENDWALL FRAME"]):
@@ -150,9 +152,24 @@ def build_framing_inventory(categories: Dict[str, List[Piece]]) -> Dict[str, Any
     }
 
 
+def _all_shipper_marks(inventory: Dict[str, Any], categories: Optional[Dict[str, List[Piece]]] = None) -> set:
+    """Union of all marks in inventory + raw categories (case-sensitive as on shipper)."""
+    marks: set = set()
+    for fam in ("primary", "secondary"):
+        for info in (inventory.get(fam) or {}).values():
+            marks.update(info.get("marks") or [])
+    if categories:
+        for pieces in categories.values():
+            for p in pieces:
+                if getattr(p, "mark", None):
+                    marks.add(p.mark)
+    return marks
+
+
 def review_primary_framing(
     inventory: Dict[str, Any],
     drawings_marks: Optional[Dict[str, int]] = None,
+    all_shipper_marks: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
     """
     Primary framing review findings.
@@ -198,28 +215,24 @@ def review_primary_framing(
             "rule": "primary_frames_vs_columns",
         })
 
-    # Cross-check against drawings mark map when available
+    # Cross-check: mark present anywhere on shipper is enough (avoid false CRITICAL)
     if drawings_marks:
+        ship_marks = all_shipper_marks or _all_shipper_marks(inventory)
+        ship_upper = {str(m).upper() for m in ship_marks}
         primary_draw_marks = {
             m: q for m, q in drawings_marks.items()
             if classify_mark(m)[0] == "primary"
         }
-        missing = []
-        for m, q in primary_draw_marks.items():
-            # shipper inventory may use different grouping; check overall mark presence via pieces
-            found = False
-            for info in primary.values():
-                if m in info["marks"]:
-                    found = True
-                    break
-            if not found:
-                missing.append((m, q))
-
-        for m, q in missing[:25]:
+        for m, q in list(primary_draw_marks.items())[:25]:
+            if str(m).upper() in ship_upper or m in ship_marks:
+                continue
             findings.append({
-                "severity": "CRITICAL",
+                "severity": "WARNING",
                 "category": "Primary Framing",
-                "message": f"Primary mark {m} (qty {q}) appears on drawings but was not found in shipper primary inventory.",
+                "message": (
+                    f"Primary mark {m} (qty {q}) appears on drawings but was not found "
+                    "on the shipper. Confirm phase or mark naming."
+                ),
                 "mark": m,
                 "expected": q,
                 "actual": 0,
@@ -233,6 +246,7 @@ def review_secondary_framing(
     inventory: Dict[str, Any],
     has_primary: bool = True,
     drawings_marks: Optional[Dict[str, int]] = None,
+    all_shipper_marks: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
     """
     Secondary framing review findings.
@@ -293,22 +307,24 @@ def review_secondary_framing(
             "rule": "flange_brace_with_girts",
         })
 
-    # Drawings cross-check for secondary marks
+    # Drawings cross-check: present anywhere on shipper is enough
     if drawings_marks:
+        ship_marks = all_shipper_marks or _all_shipper_marks(inventory)
+        ship_upper = {str(m).upper() for m in ship_marks}
         sec_draw = {
             m: q for m, q in drawings_marks.items()
             if classify_mark(m)[0] == "secondary"
         }
-        missing = []
-        for m, q in sec_draw.items():
-            found = any(m in info["marks"] for info in secondary.values())
-            if not found:
-                missing.append((m, q))
-        for m, q in missing[:25]:
+        for m, q in list(sec_draw.items())[:25]:
+            if str(m).upper() in ship_upper or m in ship_marks:
+                continue
             findings.append({
-                "severity": "CRITICAL",
+                "severity": "WARNING",
                 "category": "Secondary Framing",
-                "message": f"Secondary mark {m} (qty {q}) on drawings but missing from shipper secondary inventory.",
+                "message": (
+                    f"Secondary mark {m} (qty {q}) on drawings but missing from shipper. "
+                    "Confirm phase or mark naming."
+                ),
                 "mark": m,
                 "expected": q,
                 "actual": 0,
@@ -324,8 +340,11 @@ def full_framing_review(
 ) -> List[Dict[str, Any]]:
     """Run complete primary + secondary framing review."""
     inv = build_framing_inventory(categories)
+    all_marks = _all_shipper_marks(inv, categories)
     findings = []
-    findings.extend(review_primary_framing(inv, drawings_marks))
+    findings.extend(review_primary_framing(inv, drawings_marks, all_shipper_marks=all_marks))
     has_primary = sum(v["count"] for v in inv.get("primary", {}).values()) > 0
-    findings.extend(review_secondary_framing(inv, has_primary=has_primary, drawings_marks=drawings_marks))
+    findings.extend(review_secondary_framing(
+        inv, has_primary=has_primary, drawings_marks=drawings_marks, all_shipper_marks=all_marks,
+    ))
     return findings

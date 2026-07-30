@@ -169,27 +169,40 @@ def extract_closure_counts(categories: Dict[str, list], raw_text: str = "") -> D
     ordered = [(k, CLOSURE_PATTERNS[k]) for k in priority if k in CLOSURE_PATTERNS]
     ordered += [(k, v) for k, v in CLOSURE_PATTERNS.items() if k not in priority]
 
+    def _tally(desc: str, qty: int = 1) -> None:
+        mentions_foam = "foam" in desc
+        for ctype, pats in ordered:
+            if mentions_foam and ctype.startswith("metal_"):
+                continue
+            for pat in pats:
+                if re.search(pat, desc, re.IGNORECASE):
+                    q = qty or 1
+                    counts[ctype] += q
+                    counts["total"] += q
+                    if ctype.startswith("metal_") or ctype in ("end_dam", "z_bird_stop"):
+                        counts["metal_total"] += q
+                    if ctype.startswith("foam_"):
+                        counts["foam_total"] += q
+                    return
+
     for cat, pieces in (categories or {}).items():
         for p in pieces:
             desc = f"{getattr(p, 'mark', '')} {getattr(p, 'description', '')} {cat}".lower()
-            mentions_foam = "foam" in desc
-            matched = False
-            for ctype, pats in ordered:
-                # Never assign metal_* when the line is explicitly foam
-                if mentions_foam and ctype.startswith("metal_"):
-                    continue
-                for pat in pats:
-                    if re.search(pat, desc, re.IGNORECASE):
-                        q = getattr(p, "quantity", 1) or 1
-                        counts[ctype] += q
-                        counts["total"] += q
-                        if ctype.startswith("metal_") or ctype in ("end_dam", "z_bird_stop"):
-                            counts["metal_total"] += q
-                        if ctype.startswith("foam_"):
-                            counts["foam_total"] += q
-                        matched = True
-                        break
-                if matched:
+            _tally(desc, getattr(p, "quantity", 1) or 1)
+
+    # Free-text fallback: only when tables yielded nothing for that family
+    if raw_text and counts["total"] == 0:
+        blob = raw_text.lower()
+        # Count 1 synthetic hit per matching family to unlock presence rules
+        for ctype, pats in ordered:
+            for pat in pats:
+                if re.search(pat, blob, re.IGNORECASE):
+                    counts[ctype] += 1
+                    counts["total"] += 1
+                    if ctype.startswith("metal_") or ctype in ("end_dam", "z_bird_stop"):
+                        counts["metal_total"] += 1
+                    if ctype.startswith("foam_"):
+                        counts["foam_total"] += 1
                     break
     return counts
 
@@ -215,12 +228,12 @@ def detect_panel_families(
         blob_parts.extend(str(k) for k in panel_keys)
     blob = " ".join(blob_parts).lower()
 
-    has_ss = any(k in blob for k in STANDING_SEAM_KEYWORDS) or bool(
-        re.search(r"\b(csx?|clx?|vsr6?|ssr|s6)\b", blob, re.IGNORECASE)
-    )
-    # Avoid matching "cl" inside unrelated words; MBS codes still caught by regex above
-    if not has_ss and re.search(r"\bcl\b", blob) and any(
-        k in blob for k in ("panel", "roof", "standing", "seam", "central")
+    # Prefer explicit names; short MBS codes only with panel/roof context
+    has_ss = any(k in blob for k in STANDING_SEAM_KEYWORDS)
+    if not has_ss and re.search(r"\b(csx|clx|vsr6|ssr|s6)\b", blob, re.IGNORECASE):
+        has_ss = True
+    if not has_ss and re.search(r"\b(cs|cl)\b", blob, re.IGNORECASE) and any(
+        k in blob for k in ("panel", "roof", "standing", "seam", "central", "sheeting")
     ):
         has_ss = True
 
@@ -237,7 +250,10 @@ def detect_panel_families(
     )
     has_central_loc = any(
         k in blob for k in ("central-loc", "central loc", "central-seam", "central seam")
-    ) or bool(re.search(r"\b(cl|clx|cs|csx)\b", blob))
+    ) or bool(re.search(r"\b(clx|csx)\b", blob)) or (
+        bool(re.search(r"\b(cl|cs)\b", blob))
+        and any(k in blob for k in ("panel", "roof", "standing", "seam", "central"))
+    )
     has_avp = "avp" in blob
     has_shadow_rib = any(k in blob for k in ("shadow rib", "shadowrib"))
     has_masterline = any(k in blob for k in ("masterline", "master line", "masterline-16", "ml16"))

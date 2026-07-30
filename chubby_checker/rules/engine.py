@@ -138,15 +138,39 @@ class DiscrepancyEngine:
         purlin_lines = self.drawings.get("purlin_lines") or self.shipper.get("purlin_lines")
         endlap_lines = int(self.drawings.get("endlap_lines") or self.shipper.get("endlap_lines") or 0)
         slopes = int(getattr(geo, "slopes", None) or self.drawings.get("slopes") or 1)
-        has_ins = bool(acc.get("thermal_blocks", 0) or self.drawings.get("has_insulation", True))
         clip_key = self.shipper.get("clip_key") or self.drawings.get("clip_key")
 
-        accessory_bits = [self.shipper.get("raw_text") or ""]
-        for cat, pieces in (self.shipper.get("categories") or {}).items():
-            if any(k in cat.lower() for k in ("standing", "ss access", "clip", "seam")):
+        categories = self.shipper.get("categories") or {}
+        shipper_raw = self.shipper.get("raw_text") or ""
+        families = detect_panel_families(categories, shipper_raw)
+        # Insulation: only when evidence exists (do NOT default True)
+        cat_blob = " ".join(categories.keys()).lower() + " " + shipper_raw.lower()
+        has_ins = bool(
+            self.drawings.get("has_insulation") is True
+            or (isinstance(self.drawings.get("notes"), dict) and self.drawings["notes"].get("has_insulation") is True)
+            or "insulation" in cat_blob
+            or "skyliner" in cat_blob
+            or int(acc.get("thermal_blocks", 0) or 0) > 0
+        )
+
+        accessory_bits = [shipper_raw]
+        for cat, pieces in categories.items():
+            if any(k in cat.lower() for k in ("standing", "ss access", "clip", "seam", "panel")):
                 for p in pieces:
                     accessory_bits.append(f"{getattr(p, 'mark', '')} {getattr(p, 'description', '')}")
+        if families.get("standing_seam"):
+            accessory_bits.append("standing seam")
         accessory_text = " ".join(str(b) for b in accessory_bits if b)
+
+        # Skip entire SS geometry suite when no SS evidence at all
+        if not (
+            families.get("standing_seam")
+            or int(acc.get("sliding_clips", 0) or 0) > 0
+            or coverage
+            or "standing seam" in accessory_text.lower()
+            or "ss access" in accessory_text.lower()
+        ):
+            return
 
         for f in check_standing_seam_system(
             ss_accessories=acc,
@@ -178,11 +202,26 @@ class DiscrepancyEngine:
             self._add(f)
 
     def _check_thermal_blocks_verified(self):
-        accessories = self.shipper.get("ss_accessories", {})
-        clips = accessories.get("sliding_clips", 0)
-        blocks = accessories.get("thermal_blocks", 0)
-        has_insulation = blocks > 0 or clips > 0
-        for f in check_thermal_blocks(clips, blocks, has_insulation=has_insulation):
+        """
+        Secondary thermal check. Skip when standing-seam path already reported
+        ss_thermal_blocks. Only flag when insulation is evidenced (not merely clips).
+        """
+        if any(d.rule == "ss_thermal_blocks" for d in self.discrepancies):
+            return
+        accessories = self.shipper.get("ss_accessories", {}) or {}
+        clips = int(accessories.get("sliding_clips", 0) or 0)
+        blocks = int(accessories.get("thermal_blocks", 0) or 0)
+        cat_blob = " ".join((self.shipper.get("categories") or {}).keys()).lower()
+        raw = (self.shipper.get("raw_text") or "").lower()
+        has_insulation = bool(
+            self.drawings.get("has_insulation") is True
+            or "insulation" in cat_blob
+            or "skyliner" in cat_blob
+            or "insulation" in raw
+            or blocks > 0
+        )
+        # WARNING only here (strict=False) — avoid double CRITICAL with ss path
+        for f in check_thermal_blocks(clips, blocks, has_insulation=has_insulation, strict=False):
             self._add(f)
 
     def _check_closures_trim_gutter(self):
@@ -243,7 +282,15 @@ class DiscrepancyEngine:
                 "actual": trim_info["count"], "rule": "trim_present",
             })
         gd = extract_gutter_downspout(categories, raw_text)
-        for f in check_gutter_downspout(gd, has_roof_panels=has_panels, geo=self.geometry):
+        # Gutter/DS only when roof-ish panels/categories present (not wall-only)
+        roofish = any(
+            k in cat_blob or k in (raw_text or "").lower()
+            for k in (
+                "standing seam", "roof", "ssr", "vsr", "double lok", "r-loc", "rloc",
+                "pbr", "standard panel",
+            )
+        ) or bool(families.get("standing_seam"))
+        for f in check_gutter_downspout(gd, has_roof_panels=roofish, geo=self.geometry):
             self._add(f)
         for f in check_trim_lengths_against_geometry(trim_info, self.geometry):
             self._add(f)
@@ -261,15 +308,32 @@ class DiscrepancyEngine:
                 "rule": "mark_by_mark",
             })
             return
-        drawings_map = filter_buyouts_from_marks(drawings_map)
+        # Build context for buyout filtering from drawings member tables
+        mark_ctx: Dict[str, str] = {}
+        for cat, pieces in (self.drawings.get("member_tables") or {}).items():
+            for p in pieces:
+                mark_ctx[p.mark] = (
+                    f"{cat} {getattr(p, 'description', '')} {getattr(p, 'section', '') or ''}"
+                )
+        drawings_map = filter_buyouts_from_marks(drawings_map, mark_context=mark_ctx)
         shipper_map: Dict[str, int] = {}
+        shipper_map_ci: Dict[str, int] = {}
         for pieces in self.shipper.get("categories", {}).values():
             for p in pieces:
                 if is_buyout_text(f"{p.mark} {getattr(p, 'description', '')}"):
                     continue
                 shipper_map[p.mark] = shipper_map.get(p.mark, 0) + p.quantity
+                key = str(p.mark).upper()
+                shipper_map_ci[key] = shipper_map_ci.get(key, 0) + p.quantity
+        # Skip marks already reported by framing cross-check to avoid double CRITICAL
+        framing_missing = {
+            d.mark for d in self.discrepancies
+            if d.rule in ("primary_mark_missing", "secondary_mark_missing") and d.mark
+        }
         for mark, expected_qty in drawings_map.items():
-            actual_qty = shipper_map.get(mark, 0)
+            if mark in framing_missing:
+                continue
+            actual_qty = shipper_map.get(mark, 0) or shipper_map_ci.get(str(mark).upper(), 0)
             if actual_qty == 0:
                 self._add({
                     "severity": "CRITICAL", "category": "Missing Piece",
@@ -320,13 +384,21 @@ class DiscrepancyEngine:
             has_mezz = has_mezz or notes.get("has_mezzanine", False)
         cats = " ".join(self.shipper.get("categories", {}).keys()).upper()
         shipper_raw = (self.shipper.get("raw_text") or "").upper()
-        if has_crane and "RUNWAY" not in cats and "CRANE" not in cats and "RUNWAY" not in shipper_raw:
+        if (
+            has_crane
+            and "RUNWAY" not in cats and "CRANE" not in cats
+            and "RUNWAY" not in shipper_raw and "CRANE" not in shipper_raw
+        ):
             self._add({
                 "severity": "WARNING", "category": "Crane",
                 "message": "Drawings reference crane/runway but no Runway/Crane category in shipper.",
                 "rule": "system_crane",
             })
-        if has_mezz and "MEZZ" not in cats and "MEZZANINE" not in cats and "MEZZ" not in shipper_raw:
+        if (
+            has_mezz
+            and "MEZZ" not in cats and "MEZZANINE" not in cats
+            and "MEZZ" not in shipper_raw and "MEZZANINE" not in shipper_raw
+        ):
             self._add({
                 "severity": "INFO", "category": "Mezzanine",
                 "message": "Drawings show mezzanine. Confirm framing is in this or another phase.",
@@ -404,19 +476,37 @@ class DiscrepancyEngine:
             self._add(f)
 
     def _check_panel_and_accessories(self):
-        coverage = self.shipper.get("panel_coverage", {})
-        accessories = self.shipper.get("ss_accessories", {})
-        if not coverage:
-            return
-        dominant = max(coverage.items(), key=lambda x: x[1])[0] if coverage else None
-        clips = accessories.get("sliding_clips", 0)
-        if str(dominant) == "16":
-            self._add({
-                "severity": "INFO", "category": "Panel",
-                "message": f"VS16 / 16\" panels detected ({coverage.get('16', coverage.get(16, 0))} pcs). Higher clip density expected.",
-                "actual": coverage, "rule": "coverage_width",
-            })
-        if clips == 0 and sum(coverage.values()) > 0:
+        coverage = self.shipper.get("panel_coverage", {}) or {}
+        accessories = self.shipper.get("ss_accessories", {}) or {}
+        families = detect_panel_families(
+            self.shipper.get("categories", {}),
+            self.shipper.get("raw_text") or "",
+        )
+        clips = int(accessories.get("sliding_clips", 0) or 0)
+
+        if coverage:
+            dominant = max(coverage.items(), key=lambda x: x[1])[0]
+            if str(dominant) == "16":
+                self._add({
+                    "severity": "INFO", "category": "Panel",
+                    "message": (
+                        f"VS16 / 16\" panels detected "
+                        f"({coverage.get('16', coverage.get(16, 0))} pcs). "
+                        "Higher clip density expected."
+                    ),
+                    "actual": coverage, "rule": "coverage_width",
+                })
+
+        # Missing-clip CRITICAL when SS is known even without panel_coverage geometry
+        already = any(d.rule == "ss_clips_present" for d in self.discrepancies)
+        if (
+            not already
+            and clips == 0
+            and (
+                families.get("standing_seam")
+                or (coverage and sum(coverage.values()) > 0)
+            )
+        ):
             self._add({
                 "severity": "CRITICAL", "category": "Accessories",
                 "message": "Standing seam panels present but zero sliding clips found.",

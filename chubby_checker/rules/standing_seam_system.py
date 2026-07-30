@@ -115,7 +115,20 @@ def check_standing_seam_system(
             "rule": "ss_clip_library_id",
         })
 
-    if clips == 0 and (panel_coverage_in or building_width_ft):
+    # Indicate SS without requiring geometry (coverage/width often unavailable)
+    _acc_l = (accessory_text or "").lower()
+    _ss_keywords = (
+        "standing seam", "sliding clip", "central-loc", "central loc",
+        "double lok", "vsr", "ssr", "ss access",
+    )
+    ss_text = any(k in _acc_l for k in _ss_keywords)
+    ss_indicated = bool(
+        panel_coverage_in or building_width_ft or ss_text or clips > 0 or backup > 0
+    )
+
+    if clips == 0 and ss_indicated and (
+        panel_coverage_in or building_width_ft or ss_text
+    ):
         findings.append({
             "severity": "CRITICAL",
             "category": "Standing Seam",
@@ -158,15 +171,22 @@ def check_standing_seam_system(
                 "rule": "ss_clip_screws_min",
             })
 
-        need_thermal = has_insulation or (clip_spec.requires_thermal_block if clip_spec else True)
+        # Thermal only when insulation is confirmed AND clip type needs a spacer
+        # (or insulation confirmed with unknown clip). Do NOT treat clips alone as insulation.
+        clip_needs_spacer = bool(
+            getattr(clip_spec, "requires_thermal_spacer", False) if clip_spec else False
+        )
+        need_thermal = bool(has_insulation) and (clip_needs_spacer or clip_spec is None)
         if need_thermal:
             if blocks == 0:
                 findings.append({
-                    "severity": "CRITICAL",
+                    "severity": "WARNING",
                     "category": "Standing Seam",
                     "message": (
-                        f"{clips} clips; thermal blocks required by "
-                        f"{'insulation and/or clip type' if clip_spec else 'system'} but none found."
+                        f"{clips} clips with insulation indicated; thermal spacer/blocks "
+                        f"expected (~1:1) but none found"
+                        + (f" for {clip_spec.name}" if clip_spec else "")
+                        + "."
                     ),
                     "expected": clips,
                     "actual": 0,

@@ -36,7 +36,8 @@ Important distinctions
 - Joist seats or connections on Ascent beams are Ascent; the joists are not.
 """
 
-from typing import Dict, List, Set, Any
+import re
+from typing import Dict, List, Set, Any, Optional
 
 # ---------------------------------------------------------------------------
 # Keyword groups (order = specificity preference)
@@ -55,9 +56,8 @@ INSULATION_KEYWORDS = [
     "fiberglass blanket",
 ]
 
-# Insulated Metal Panels – always buy-out
+# Insulated Metal Panels – always buy-out (avoid bare "imp" substring)
 IMP_KEYWORDS = [
-    "imp",
     "insulated metal panel",
     "insulated panel",
     "kingspan",
@@ -67,20 +67,24 @@ IMP_KEYWORDS = [
     "metl-span",
     "metlspan",
 ]
+IMP_WORD_RE = re.compile(r"\bimps?\b", re.IGNORECASE)
 
 # Joist & Deck – New Millennium (framing by others)
+# Prefer phrases; bare "deck" alone is too aggressive for mark filters
 JOIST_DECK_KEYWORDS = [
     "bar joist",
     "steel joist",
-    "joist",
+    "open web joist",
     "new millennium",
     "roof deck",
     "floor deck",
     "metal deck",
     "b-deck",
+    "b deck",
     "n-deck",
-    "deck",
+    "structural deck",
 ]
+JOIST_WORD_RE = re.compile(r"\bjoists?\b", re.IGNORECASE)
 
 # Door / window / louver UNITS (not the framed opening)
 DOOR_WINDOW_KEYWORDS = [
@@ -122,6 +126,7 @@ BUYOUT_KEYWORDS: List[str] = (
     + DOOR_WINDOW_KEYWORDS
     + SKYLIGHT_VENT_FAN_KEYWORDS
 )
+# Note: bare "imp" / "deck" / lone "joist" are handled via word-boundary helpers
 
 # Exact category names that appear on Ascent Shipping List Index
 BUYOUT_CATEGORIES: Set[str] = {
@@ -148,7 +153,15 @@ def is_buyout_text(text: str) -> bool:
     t = _normalize(text)
     if not t:
         return False
-    return any(k in t for k in BUYOUT_KEYWORDS)
+    if any(k in t for k in BUYOUT_KEYWORDS):
+        return True
+    if IMP_WORD_RE.search(t):
+        return True
+    if JOIST_WORD_RE.search(t) and any(
+        k in t for k in ("bar", "steel", "open web", "millennium", "nmbs")
+    ):
+        return True
+    return False
 
 
 def is_buyout_category(category: str) -> bool:
@@ -168,20 +181,49 @@ def is_insulation(text: str) -> bool:
 
 def is_joist_or_deck(text: str) -> bool:
     t = _normalize(text)
-    return any(k in t for k in JOIST_DECK_KEYWORDS)
+    if any(k in t for k in JOIST_DECK_KEYWORDS):
+        return True
+    return bool(JOIST_WORD_RE.search(t) and any(
+        k in t for k in ("bar", "steel", "open web", "millennium", "nmbs", "deck")
+    ))
 
 
 def is_imp(text: str) -> bool:
     t = _normalize(text)
-    return any(k in t for k in IMP_KEYWORDS)
+    if any(k in t for k in IMP_KEYWORDS):
+        return True
+    return bool(IMP_WORD_RE.search(t))
 
 
-def filter_buyouts_from_marks(mark_map: Dict[str, int]) -> Dict[str, int]:
+def filter_buyouts_from_marks(
+    mark_map: Dict[str, int],
+    mark_context: Optional[Dict[str, str]] = None,
+) -> Dict[str, int]:
     """
     Remove marks that look like buy-outs so they do not generate
     CRITICAL missing-piece errors against drawings.
+
+    mark_context: optional mark → description/category blob for richer filtering
+    (joists often use marks like J1 / BJ3 that do not contain the word 'joist').
     """
-    return {m: q for m, q in mark_map.items() if not is_buyout_text(m)}
+    out: Dict[str, int] = {}
+    ctx = mark_context or {}
+    for m, q in mark_map.items():
+        blob = f"{m} {ctx.get(m, '')}"
+        if is_buyout_text(blob):
+            continue
+        # Common joist mark patterns when context says joist/deck
+        mu = (m or "").upper()
+        ctx_l = (ctx.get(m) or "").lower()
+        if re.match(r"^(BJ|OJ|J)\d", mu) and any(
+            k in ctx_l for k in ("joist", "deck", "millennium", "nmbs")
+        ):
+            continue
+        # Bare BJ/OJ marks (New Millennium style) without context → treat as buy-out
+        if re.match(r"^(BJ|OJ)\d", mu):
+            continue
+        out[m] = q
+    return out
 
 
 def check_unexpected_buyouts(shipper_categories: Dict[str, Any]) -> List[Dict[str, Any]]:

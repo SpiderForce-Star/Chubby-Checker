@@ -34,6 +34,7 @@ class MultiPhaseShipper:
         }
         combined_coverage: Dict[str, int] = {}
         combined_weights: Dict[str, float] = {}
+        raw_text_parts: List[str] = []
         total_weight = 0.0
         job_number = ""
         phase_names: List[str] = []
@@ -76,6 +77,11 @@ class MultiPhaseShipper:
             for cat, wt in weights.items():
                 combined_weights[cat] = combined_weights.get(cat, 0.0) + wt
 
+            # Preserve free-text for closure/family detection
+            pages = list(getattr(parser, "raw_text_pages", []) or [])
+            if pages:
+                raw_text_parts.append("\n".join(pages))
+
             if summary and getattr(summary, "total_weight", 0):
                 total_weight += summary.total_weight
             if summary and getattr(summary, "job_number", "") and not job_number:
@@ -103,6 +109,7 @@ class MultiPhaseShipper:
             "ss_accessories": combined_accessories,
             "panel_coverage": combined_coverage,
             "summary_weights": combined_weights,
+            "raw_text": "\n".join(raw_text_parts),
             "phases": self.phases,
             "phase_count": len(self.pdf_paths),
         }
