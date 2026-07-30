@@ -139,22 +139,40 @@ class ShipperParser:
 
     def _detect_category_from_header(self, header: List[str]) -> Optional[str]:
         header_str = " ".join(header).lower()
-        if "standing seam" in header_str:
-            return "Standing Seam"
-        if "ss accessories" in header_str or "ss accessory" in header_str:
-            return "SS Accessories"
-        if "cold formed" in header_str:
-            return "Cold Formed Steel"
-        if "hot rolled beam" in header_str:
-            return "Hot Rolled Beam"
-        if "fabricated" in header_str:
-            return "Fabricated Steel"
-        if "runway" in header_str:
-            return "Runway Beams"
-        if "bolt" in header_str:
-            return "Bolts_Nuts_Washers"
-        if "cable" in header_str or "rod" in header_str:
-            return "Cables and Rods"
+        # PEMB shipper index / table categories (Ascent + multi-vendor wording)
+        checks = (
+            ("standing seam", "Standing Seam"),
+            ("ss accessories", "SS Accessories"),
+            ("ss accessory", "SS Accessories"),
+            ("cold formed", "Cold Formed Steel"),
+            ("hot rolled beam", "Hot Rolled Beam"),
+            ("hot rolled pipe", "Hot Rolled Pipe Tube"),
+            ("fabricated", "Fabricated Steel"),
+            ("flange brace", "Flange Braces"),
+            ("runway", "Runway Beams"),
+            ("crane", "Runway Beams"),
+            ("standard panel", "Standard Panels"),
+            ("exposed fastener", "Standard Panels"),
+            ("r-loc", "Standard Panels"),
+            ("rloc", "Standard Panels"),
+            ("trim", "Trim"),
+            ("sealant", "Sealant"),
+            ("screw", "Screws Fasteners"),
+            ("fastener", "Screws Fasteners"),
+            ("bolt", "Bolts_Nuts_Washers"),
+            ("insulation", "Insulation"),
+            ("bar joist", "Bar Joists"),
+            ("joist", "Bar Joists"),
+            ("deck", "Deck"),
+            ("mezzanine", "Mezzanine"),
+            ("closure", "Closures"),
+            ("cable", "Cables and Rods"),
+            ("loose clip", "Loose Clips"),
+            ("structural angle", "Structural Angle"),
+        )
+        for needle, label in checks:
+            if needle in header_str:
+                return label
         return None
 
     def _extract_from_text(self, text: str):
@@ -162,7 +180,8 @@ class ShipperParser:
             r"(Cold Formed Steel|Standard Panels|Trim|Sealant|Screws[_ ]Fasteners|"
             r"Hot Rolled Beam|Hot Rolled Pipe[_ ]Tube|Fabricated Steel|Flange Braces|"
             r"Loose Clips|Bolts[_ ]Nuts[_ ]Washers|Cables and Rods|Runway Beams|"
-            r"Structural Angle|Standing Seam|SS Accessories|Bar Joists|Insulation)\s+([\d,]+\.?\d*)",
+            r"Structural Angle|Standing Seam|SS Accessories|Bar Joists|Insulation|"
+            r"Closures|Mezzanine|Deck|Imp|Insulated Panels)\s+([\d,]+\.?\d*)",
             re.IGNORECASE,
         )
         for match in weight_pattern.finditer(text):

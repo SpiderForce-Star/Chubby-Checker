@@ -173,12 +173,14 @@ def _parse_shippers(shipper_paths: Sequence[Path]) -> Dict[str, Any]:
             f"Failed to parse shipper PDF '{paths[0].name}': {exc}"
         ) from exc
 
+    raw_pages = list(getattr(parser, "raw_text_pages", []) or [])
     shipper_data: Dict[str, Any] = {
         "categories": pieces,
         "ss_accessories": parser.get_ss_accessories() if hasattr(parser, "get_ss_accessories") else {},
         "summary_weights": parser.get_summary_weights() if hasattr(parser, "get_summary_weights") else {},
         "panel_coverage": {},
         "mark_qty": {},
+        "raw_text": "\n".join(raw_pages),
     }
     for plist in pieces.values():
         for p in plist:
@@ -201,6 +203,9 @@ def _parse_shippers(shipper_paths: Sequence[Path]) -> Dict[str, Any]:
         if hasattr(ep, "get_ss_accessories"):
             for k, v in ep.get_ss_accessories().items():
                 shipper_data["ss_accessories"][k] = shipper_data["ss_accessories"].get(k, 0) + v
+        extra_pages = list(getattr(ep, "raw_text_pages", []) or [])
+        if extra_pages:
+            shipper_data["raw_text"] = (shipper_data.get("raw_text") or "") + "\n" + "\n".join(extra_pages)
     return shipper_data
 
 
@@ -218,17 +223,29 @@ def _parse_drawings(drawings_path: Optional[Path]) -> Dict[str, Any]:
             f"Failed to parse drawings PDF '{path.name}': {exc}"
         ) from exc
 
+    notes = dparser.get_notes() if hasattr(dparser, "get_notes") else {}
     data: Dict[str, Any] = {
         "member_tables": member_tables,
         "mark_quantity_map": dparser.get_mark_quantity_map() if hasattr(dparser, "get_mark_quantity_map") else {},
-        "notes": dparser.get_notes() if hasattr(dparser, "get_notes") else {},
+        "notes": notes,
     }
-    notes = data.get("notes") or {}
     if isinstance(notes, dict):
-        if notes.get("has_mezzanine"):
-            data["has_mezzanine"] = True
-        if notes.get("has_crane"):
-            data["has_crane"] = True
+        for flag in (
+            "has_mezzanine", "has_crane", "has_bdeck_joist", "has_imp",
+            "has_standing_seam", "has_exposed_panels",
+            "has_primary_framing", "has_secondary_framing",
+        ):
+            if notes.get(flag):
+                data[flag] = True
+        if notes.get("pemb_signals"):
+            data["pemb_signals"] = notes["pemb_signals"]
+        if notes.get("panel_info"):
+            data["panel_info"] = notes["panel_info"]
+        if notes.get("raw_text"):
+            data["raw_text"] = notes["raw_text"]
+        bi = notes.get("building_info") or {}
+        if isinstance(bi, dict) and bi.get("vendors_hinted"):
+            data["vendors_hinted"] = bi["vendors_hinted"]
     return data
 
 
@@ -245,7 +262,19 @@ def _merge_drawings_data(parts: List[Dict[str, Any]]) -> Dict[str, Any]:
         "notes": {},
         "has_crane": False,
         "has_mezzanine": False,
+        "has_bdeck_joist": False,
+        "has_imp": False,
+        "has_standing_seam": False,
+        "has_exposed_panels": False,
+        "has_primary_framing": False,
+        "has_secondary_framing": False,
+        "vendors_hinted": [],
     }
+    flag_keys = (
+        "has_crane", "has_mezzanine", "has_bdeck_joist", "has_imp",
+        "has_standing_seam", "has_exposed_panels",
+        "has_primary_framing", "has_secondary_framing",
+    )
     for data in parts:
         for cat, pieces in (data.get("member_tables") or {}).items():
             merged["member_tables"].setdefault(cat, []).extend(pieces)
@@ -256,14 +285,19 @@ def _merge_drawings_data(parts: List[Dict[str, Any]]) -> Dict[str, Any]:
             for k, v in notes.items():
                 if k not in merged["notes"] or v:
                     merged["notes"][k] = v
-            if notes.get("has_crane"):
-                merged["has_crane"] = True
-            if notes.get("has_mezzanine"):
-                merged["has_mezzanine"] = True
-        if data.get("has_crane"):
-            merged["has_crane"] = True
-        if data.get("has_mezzanine"):
-            merged["has_mezzanine"] = True
+            for fk in flag_keys:
+                if notes.get(fk):
+                    merged[fk] = True
+        for fk in flag_keys:
+            if data.get(fk):
+                merged[fk] = True
+        if data.get("pemb_signals"):
+            merged["pemb_signals"] = data["pemb_signals"]
+        if data.get("panel_info"):
+            merged["panel_info"] = data["panel_info"]
+        for v in data.get("vendors_hinted") or []:
+            if v not in merged["vendors_hinted"]:
+                merged["vendors_hinted"].append(v)
         # Preserve first-seen geometry-ish scalars if present
         for key in ("width_ft", "length_ft", "purlin_lines", "endlap_lines", "slopes", "raw_text"):
             if key not in merged and data.get(key) is not None:

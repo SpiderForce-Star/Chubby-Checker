@@ -14,6 +14,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import re
 import pdfplumber
 from chubby_checker.models.piece import Piece
+from chubby_checker.rules.pemb_components import detect_pemb_signals
 
 
 def _parse_length_to_inches(length_str: str) -> Optional[float]:
@@ -77,27 +78,106 @@ class DrawingsParser:
     # ------------------------------------------------------------------
     def _extract_notes_and_info(self, text: str):
         upper = text.upper()
+        signals = detect_pemb_signals(raw_text=text)
 
-        if "MEZZANINE" in upper:
-            self.notes.append("Mezzanine present")
+        if signals.get("mezzanine") or "MEZZANINE" in upper:
+            if "Mezzanine present" not in self.notes:
+                self.notes.append("Mezzanine present")
             self.building_info["has_mezzanine"] = True
 
-        if re.search(r"\b(crane|runway\s+beam|runway\s+support)\b", text, re.IGNORECASE):
-            self.notes.append("Crane / runway system referenced")
+        if signals.get("crane") or re.search(
+            r"\b(crane|runway\s+beam|runway\s+support)\b", text, re.IGNORECASE
+        ):
+            if "Crane / runway system referenced" not in self.notes:
+                self.notes.append("Crane / runway system referenced")
             self.building_info["has_crane"] = True
 
-        if re.search(r"\b(joist|new\s+millennium)\b", text, re.IGNORECASE):
-            self.notes.append("Joists referenced (likely buy-out)")
+        if signals.get("bdeck_joist") or re.search(
+            r"\b(joist|new\s+millennium|b-?deck)\b", text, re.IGNORECASE
+        ):
+            note = "Joists / structural deck referenced (likely buy-out)"
+            if note not in self.notes:
+                self.notes.append(note)
+            self.building_info["has_bdeck_joist"] = True
 
-        # Panel type / coverage hints
-        if re.search(r"24\s*Ga\.?\s*CS|Central\s+Seam|CS244", text, re.IGNORECASE):
-            self.panel_info["type"] = "Central Seam"
-            self.panel_info["coverage"] = 24
-        if re.search(r"CS184|18\"\s*PANEL", text, re.IGNORECASE):
+        if signals.get("imp"):
+            note = "Insulated metal panels (IMP) referenced"
+            if note not in self.notes:
+                self.notes.append(note)
+            self.building_info["has_imp"] = True
+
+        if signals.get("primary_framing"):
+            self.building_info["has_primary_framing"] = True
+        if signals.get("secondary_framing"):
+            self.building_info["has_secondary_framing"] = True
+        if signals.get("standing_seam"):
+            self.building_info["has_standing_seam"] = True
+            note = "Standing seam panel system referenced"
+            if note not in self.notes:
+                self.notes.append(note)
+        if signals.get("exposed_fastener"):
+            self.building_info["has_exposed_panels"] = True
+        if signals.get("concealed_wall"):
+            self.building_info["has_concealed_wall"] = True
+        if signals.get("liner"):
+            self.building_info["has_liner"] = True
+        if signals.get("sealant_mentioned"):
+            self.building_info["mentions_sealant"] = True
+        if signals.get("trim_mentioned"):
+            self.building_info["mentions_trim"] = True
+
+        vendors = signals.get("vendors_hinted") or []
+        if vendors:
+            prev = list(self.building_info.get("vendors_hinted") or [])
+            for v in vendors:
+                if v not in prev:
+                    prev.append(v)
+            self.building_info["vendors_hinted"] = prev
+
+        # Merge panel family list
+        fams = list(self.panel_info.get("families") or [])
+        for f in signals.get("panel_families") or []:
+            if f not in fams:
+                fams.append(f)
+        if fams:
+            self.panel_info["families"] = fams
+
+        # Panel type / coverage hints (Ascent + multi-vendor)
+        if re.search(r"24\s*Ga\.?\s*CS|Central\s+Seam|CS244|Central-?Loc|Central\s+Loc", text, re.IGNORECASE):
+            self.panel_info["type"] = self.panel_info.get("type") or "Central Seam / Central-Loc"
+            self.panel_info["coverage"] = self.panel_info.get("coverage") or 24
+        if re.search(r"CS184|18\"\s*PANEL|18\s*in(?:ch)?\s*(?:standing|coverage|panel)", text, re.IGNORECASE):
             self.panel_info["coverage_18"] = True
-        if re.search(r"VS16|16\"\s*(wide|panel|coverage)", text, re.IGNORECASE):
+            self.panel_info["coverage"] = self.panel_info.get("coverage") or 18
+        if re.search(r"VS16|VSR6|16\"\s*(wide|panel|coverage)|Central-?Span", text, re.IGNORECASE):
             self.panel_info["coverage"] = 16
-            self.panel_info["type"] = "VS16"
+            self.panel_info["type"] = "VS16 / VSR6 / Central-Span"
+        if re.search(r"Double\s*-?\s*Lok|DoubleLok", text, re.IGNORECASE):
+            self.panel_info["type"] = "Double Lok"
+            self.building_info["has_standing_seam"] = True
+        if re.search(r"\b(R-?Loc|RLOC|PBR|AVP|PBA|PBM|7\.2)\b", text, re.IGNORECASE):
+            self.panel_info.setdefault("exposed_types", [])
+            for label, pat in (
+                ("R-Loc/PBR", r"R-?Loc|RLOC|PBR"),
+                ("AVP", r"\bAVP\b"),
+                ("PBA", r"\bPBA\b"),
+                ("PBM", r"\bPBM\b"),
+                ("7.2", r"7\.2"),
+            ):
+                if re.search(pat, text, re.IGNORECASE):
+                    if label not in self.panel_info["exposed_types"]:
+                        self.panel_info["exposed_types"].append(label)
+        if re.search(r"MasterLine|Shadow\s*Rib|FW-?120|PL-?121", text, re.IGNORECASE):
+            self.panel_info.setdefault("wall_systems", [])
+            for label, pat in (
+                ("MasterLine", r"MasterLine"),
+                ("Shadow Rib", r"Shadow\s*Rib"),
+                ("FW-120", r"FW-?120"),
+                ("PL121", r"PL-?121"),
+            ):
+                if re.search(pat, text, re.IGNORECASE):
+                    if label not in self.panel_info["wall_systems"]:
+                        self.panel_info["wall_systems"].append(label)
 
         # Rough building size
         m = re.search(
@@ -243,12 +323,22 @@ class DrawingsParser:
     # Public helpers used by the engine / CLI
     # ------------------------------------------------------------------
     def get_notes(self) -> Dict[str, Any]:
+        raw_text = "\n".join(self.raw_pages)
+        pemb = detect_pemb_signals(raw_text=raw_text)
         return {
             "notes": self.notes,
             "has_mezzanine": self.building_info.get("has_mezzanine", False),
             "has_crane": self.building_info.get("has_crane", False),
+            "has_bdeck_joist": self.building_info.get("has_bdeck_joist", False),
+            "has_imp": self.building_info.get("has_imp", False),
+            "has_standing_seam": self.building_info.get("has_standing_seam", False),
+            "has_exposed_panels": self.building_info.get("has_exposed_panels", False),
+            "has_primary_framing": self.building_info.get("has_primary_framing", False),
+            "has_secondary_framing": self.building_info.get("has_secondary_framing", False),
             "building_info": self.building_info,
             "panel_info": self.panel_info,
+            "pemb_signals": pemb,
+            "raw_text": raw_text,
         }
 
     def get_all_pieces(self) -> List[Piece]:

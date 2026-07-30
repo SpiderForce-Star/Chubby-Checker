@@ -29,6 +29,10 @@ from chubby_checker.rules.weight_rules import check_weight_rollup
 from chubby_checker.rules.bolt_rules import check_bolts
 from chubby_checker.rules.standing_seam_system import check_standing_seam_system
 from chubby_checker.rules.sheeting_fasteners import check_sheeting_fasteners
+from chubby_checker.rules.pemb_components import (
+    detect_pemb_signals,
+    cross_check_drawings_to_shipper,
+)
 
 
 @dataclass
@@ -83,6 +87,7 @@ class DiscrepancyEngine:
         self._check_mark_by_mark()
         self._check_length_match()
         self._check_system_flags()
+        self._check_drawings_to_shipper()
         return self.discrepancies
 
     def _check_buyouts(self):
@@ -314,18 +319,89 @@ class DiscrepancyEngine:
             has_crane = has_crane or notes.get("has_crane", False)
             has_mezz = has_mezz or notes.get("has_mezzanine", False)
         cats = " ".join(self.shipper.get("categories", {}).keys()).upper()
-        if has_crane and "RUNWAY" not in cats and "CRANE" not in cats:
+        shipper_raw = (self.shipper.get("raw_text") or "").upper()
+        if has_crane and "RUNWAY" not in cats and "CRANE" not in cats and "RUNWAY" not in shipper_raw:
             self._add({
                 "severity": "WARNING", "category": "Crane",
                 "message": "Drawings reference crane/runway but no Runway/Crane category in shipper.",
                 "rule": "system_crane",
             })
-        if has_mezz and "MEZZ" not in cats and "MEZZANINE" not in cats:
+        if has_mezz and "MEZZ" not in cats and "MEZZANINE" not in cats and "MEZZ" not in shipper_raw:
             self._add({
                 "severity": "INFO", "category": "Mezzanine",
                 "message": "Drawings show mezzanine. Confirm framing is in this or another phase.",
                 "rule": "system_mezzanine",
             })
+
+    def _check_drawings_to_shipper(self):
+        """PEMB-aware cross-check: Final Drawings systems vs Complete Shipper content."""
+        if not self.drawings:
+            return
+        notes = self.drawings.get("notes") or {}
+        drawings_signals = self.drawings.get("pemb_signals")
+        if not drawings_signals and isinstance(notes, dict):
+            drawings_signals = notes.get("pemb_signals")
+        if not drawings_signals:
+            raw = self.drawings.get("raw_text") or ""
+            if isinstance(notes, dict):
+                raw = raw or notes.get("raw_text") or ""
+                note_list = notes.get("notes") or []
+                if isinstance(note_list, list):
+                    raw = raw + "\n" + "\n".join(str(n) for n in note_list)
+            # Fall back to boolean flags on drawings_data
+            flag_bits = []
+            for key, phrase in (
+                ("has_crane", "crane runway"),
+                ("has_mezzanine", "mezzanine"),
+                ("has_standing_seam", "standing seam"),
+                ("has_exposed_panels", "r-loc pbr exposed fastener"),
+                ("has_primary_framing", "rigid frame primary"),
+                ("has_secondary_framing", "purlin girt"),
+                ("has_bdeck_joist", "b-deck new millennium joist"),
+                ("has_imp", "kingspan insulated metal panel"),
+            ):
+                if self.drawings.get(key) or (isinstance(notes, dict) and notes.get(key)):
+                    flag_bits.append(phrase)
+            raw = (raw + " " + " ".join(flag_bits)).strip()
+            if not raw:
+                return
+            drawings_signals = detect_pemb_signals(raw_text=raw)
+        else:
+            # OR in top-level flags so merge path still works
+            for key, sig in (
+                ("has_crane", "crane"),
+                ("has_mezzanine", "mezzanine"),
+                ("has_standing_seam", "standing_seam"),
+                ("has_exposed_panels", "exposed_fastener"),
+                ("has_primary_framing", "primary_framing"),
+                ("has_secondary_framing", "secondary_framing"),
+                ("has_bdeck_joist", "bdeck_joist"),
+                ("has_imp", "imp"),
+            ):
+                if self.drawings.get(key) or (isinstance(notes, dict) and notes.get(key)):
+                    drawings_signals[sig] = True
+            if drawings_signals.get("standing_seam") or drawings_signals.get("exposed_fastener"):
+                drawings_signals["any_cladding"] = True
+
+        shipper_raw = self.shipper.get("raw_text") or ""
+        shipper_families = detect_panel_families(
+            self.shipper.get("categories", {}),
+            shipper_raw,
+        )
+        # Avoid duplicate crane/mezz findings if system_flags already fired
+        existing = {(d.rule, d.severity) for d in self.discrepancies}
+        for f in cross_check_drawings_to_shipper(
+            drawings_signals,
+            shipper_categories=self.shipper.get("categories", {}),
+            shipper_raw_text=shipper_raw,
+            shipper_families=shipper_families,
+        ):
+            # Skip redundant legacy system_crane / system_mezzanine duplicates
+            if f.get("rule") == "drawings_shipper_crane" and ("system_crane", "WARNING") in existing:
+                continue
+            if f.get("rule") == "drawings_shipper_mezzanine" and ("system_mezzanine", "INFO") in existing:
+                continue
+            self._add(f)
 
     def _check_panel_and_accessories(self):
         coverage = self.shipper.get("panel_coverage", {})
