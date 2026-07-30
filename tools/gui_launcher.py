@@ -15,13 +15,11 @@ _NORMAL_BG = "#f0f0f0"
 _DROP_BG = "#e3f2fd"
 _DROP_BORDER = "#1565c0"
 _DROP_OVERLAY_FG = "#0d47a1"
-# Border-color only pulse (fixed thickness) — fewer geometry invalidations
 _PULSE_COLORS = ("#1565c0", "#1e88e5", "#42a5f5", "#1e88e5")
-_PULSE_INTERVAL_MS = 140  # ~7 fps — smooth enough, low overhead
+_PULSE_INTERVAL_MS = 140
 _PULSE_THICKNESS = 3
 
 def _find_loading_video() -> Path | None:
-    """Locate Loading.mp4 (repo root or assets)."""
     candidates = (
         _ROOT / "Loading.mp4",
         _ROOT / "assets" / "Loading.mp4",
@@ -33,14 +31,10 @@ def _find_loading_video() -> Path | None:
             return p
     return None
 
-
 def _show_loading_video(root) -> None:
-    """
-    Play Chubby Checker / Ascent intro (Loading.mp4) before access code.
-    Esc or click to skip. Falls back to short branded splash if needed.
-    """
+    """Play Loading.mp4, then return so access-code gate opens."""
     video_path = _find_loading_video()
-    skipped = {"yes": False}
+    state = {"done": False, "cap": None}
 
     splash = Toplevel(root)
     splash.title("Chubby Checker")
@@ -48,6 +42,10 @@ def _show_loading_video(root) -> None:
     splash.overrideredirect(True)
     try:
         splash.attributes("-topmost", True)
+    except Exception:
+        pass
+    try:
+        splash.grab_set()
     except Exception:
         pass
 
@@ -67,56 +65,59 @@ def _show_loading_video(root) -> None:
         text="Chubby Checker\nLoading…", font=("Segoe UI", 16, "bold"), justify="center",
     )
     label.pack(fill=BOTH, expand=True)
+    Label(splash, text="Press Esc or click to skip", bg="#0d1117",
+          fg="#8b949e", font=("Segoe UI", 9)).place(relx=0.5, rely=0.97, anchor="s")
 
-    hint = Label(splash, text="Press Esc or click to skip", bg="#0d1117",
-                 fg="#8b949e", font=("Segoe UI", 9))
-    hint.place(relx=0.5, rely=0.97, anchor="s")
-
-    def skip(event=None):
-        skipped["yes"] = True
+    def finish(event=None):
+        if state["done"]:
+            return
+        state["done"] = True
+        try:
+            if state["cap"] is not None:
+                state["cap"].release()
+        except Exception:
+            pass
+        try:
+            splash.grab_release()
+        except Exception:
+            pass
         try:
             splash.destroy()
         except Exception:
             pass
 
-    splash.bind("<Escape>", skip)
-    splash.bind("<Button-1>", skip)
-    label.bind("<Button-1>", skip)
+    splash.bind("<Escape>", finish)
+    splash.bind("<Button-1>", finish)
+    label.bind("<Button-1>", finish)
+    splash.protocol("WM_DELETE_WINDOW", finish)
     try:
         splash.focus_force()
     except Exception:
         pass
+
+    # Never block longer than 18s — always hand off to access gate
+    splash.after(18000, finish)
 
     played = False
     if video_path is not None:
         try:
             import cv2  # type: ignore
             cap = cv2.VideoCapture(str(video_path))
+            state["cap"] = cap
             if cap.isOpened():
                 fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-                delay_ms = max(1, int(1000 / fps))
+                delay_ms = max(10, min(80, int(1000 / fps)))
                 photo_holder = {"img": None}
 
                 def tick():
-                    if skipped["yes"]:
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
+                    if state["done"]:
                         return
                     try:
                         ok, frame = cap.read()
                     except Exception:
                         ok, frame = False, None
                     if not ok or frame is None:
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                        try:
-                            splash.destroy()
-                        except Exception:
-                            pass
+                        finish()
                         return
                     try:
                         h, w = frame.shape[:2]
@@ -130,33 +131,27 @@ def _show_loading_video(root) -> None:
                         label.configure(image=img, text="")
                     except Exception:
                         pass
-                    if not skipped["yes"]:
+                    if not state["done"]:
                         try:
                             splash.after(delay_ms, tick)
                         except Exception:
-                            pass
+                            finish()
 
                 played = True
-                splash.after(30, tick)
+                splash.after(20, tick)
                 splash.wait_window()
-                try:
-                    cap.release()
-                except Exception:
-                    pass
         except Exception:
             played = False
 
-    if not played and not skipped["yes"]:
-        def close_fallback():
-            if not skipped["yes"]:
-                try:
-                    splash.destroy()
-                except Exception:
-                    pass
-        label.configure(text="Chubby Checker\nAscent Buildings", font=("Segoe UI", 18, "bold"), fg="#e6edf3")
-        splash.after(2500, close_fallback)
+    if not state["done"] and not played:
+        label.configure(
+            text="Chubby Checker\nAscent Buildings",
+            font=("Segoe UI", 18, "bold"), fg="#e6edf3",
+        )
+        splash.after(2500, finish)
         splash.wait_window()
-
+    elif not state["done"]:
+        finish()
 
 def _show_access_gate(root):
     granted = {"ok": False}
@@ -178,6 +173,7 @@ def _show_access_gate(root):
     Button(btn_row, text="Cancel", command=gate.destroy, width=10).pack(side=LEFT, padx=8)
     entry.bind("<Return>", try_unlock); gate.protocol("WM_DELETE_WINDOW", gate.destroy)
     root.wait_window(gate); return granted["ok"]
+
 class ChubbyCheckerGUI:
     def __init__(self, root):
         self.root = root; self.root.title("Chubby Checker"); self.root.minsize(680, 560); self.root.geometry("760x620"); self.root.configure(bg=_NORMAL_BG)
@@ -250,9 +246,8 @@ class ChubbyCheckerGUI:
         except Exception:
             self._log("Drag-and-drop unavailable - install tkinterdnd2 for full support.")
     def _set_drop_visual(self, active):
-        """Toggle drop highlight. Pulse is color-only for lower overhead."""
         if active == self._drag_active:
-            return  # no-op if state unchanged (avoids restart storms)
+            return
         self._drag_active = active
         if active:
             self.root.configure(bg=_DROP_BG)
@@ -267,13 +262,11 @@ class ChubbyCheckerGUI:
             self.drop_zone.configure(bg="#fafafa", highlightbackground="#cccccc", highlightthickness=2)
             self.drop_hint.configure(text="v  Drag & drop Shipper / Drawings PDFs here  v", fg="#666666", bg="#fafafa", font=("Segoe UI", 10))
     def _start_pulse(self):
-        """Start border-color pulse if not already running."""
         self._pulse_index = 0
         self._last_pulse_color = None
         if self._pulse_after_id is None:
             self._pulse_tick()
     def _stop_pulse(self):
-        """Cancel scheduled pulse frame; safe to call repeatedly."""
         aid = self._pulse_after_id
         if aid is not None:
             try:
@@ -284,14 +277,12 @@ class ChubbyCheckerGUI:
         self._pulse_index = 0
         self._last_pulse_color = None
     def _pulse_tick(self):
-        """Single lightweight frame: update border color only when it changes."""
         if not self._drag_active:
             self._pulse_after_id = None
             return
         color = _PULSE_COLORS[self._pulse_index % len(_PULSE_COLORS)]
         if color != self._last_pulse_color:
             try:
-                # Color-only update — no thickness / text changes (avoids layout thrash)
                 self.drop_zone.configure(highlightbackground=color)
                 self._last_pulse_color = color
             except Exception:
@@ -381,13 +372,17 @@ class ChubbyCheckerGUI:
         else:
             self._log("Status: NO ERRORS")
             messagebox.showinfo("No errors", f"Job {result.job_number}\nNo discrepancies found.\n\nReport:\n{self.report_path}")
+
 def main():
     root = Tk(); root.withdraw()
     try:
         from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1)
     except Exception: pass
-    # Intro video every launch, then access code gate
+    # 1) Intro video  2) Access code  3) Main UI
     _show_loading_video(root)
-    if not _show_access_gate(root): root.destroy(); sys.exit(0)
+    if not _show_access_gate(root):
+        root.destroy(); sys.exit(0)
     root.deiconify(); ChubbyCheckerGUI(root); root.mainloop()
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    main()
