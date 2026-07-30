@@ -80,6 +80,10 @@ def _show_loading_video(root) -> None:
             splash.destroy()
         except Exception:
             pass
+        try:
+            root.quit()
+        except Exception:
+            pass
 
     splash.bind("<Escape>", finish)
     splash.bind("<Button-1>", finish)
@@ -183,14 +187,27 @@ def _show_access_gate(root) -> bool:
     y = (gate.winfo_screenheight() // 2) - (h // 2)
     gate.geometry(f"{w}x{h}+{x}+{y}")
 
+    # Force visible on Windows (parent may be withdrawn)
     try:
         gate.attributes("-topmost", True)
     except Exception:
         pass
-    gate.lift()
-    gate.deiconify()
+    try:
+        gate.lift()
+    except Exception:
+        pass
+    try:
+        gate.deiconify()
+    except Exception:
+        pass
     try:
         gate.focus_force()
+    except Exception:
+        pass
+    try:
+        root.geometry("1x1+-100+-100")
+        root.deiconify()
+        root.update_idletasks()
     except Exception:
         pass
 
@@ -446,20 +463,60 @@ class ChubbyCheckerGUI:
             messagebox.showinfo("No errors", f"Job {result.job_number}\nNo discrepancies found.\n\nReport:\n{self.report_path}")
 
 def main():
-    root = Tk()
-    root.withdraw()
+    """
+    Launch sequence (Windows-safe):
+      1) Intro video on its OWN Tk root (fully destroyed after)
+      2) Fresh Tk root → access code gate
+      3) Main Chubby Checker UI
+    """
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
+
+    print("[Chubby Checker] Starting intro...", flush=True)
+    intro = Tk()
+    intro.withdraw()
     try:
-        # 1) Intro video → 2) Access code → 3) Main UI
-        _show_loading_video(root)
-        if not _show_access_gate(root):
+        _show_loading_video(intro)
+    except Exception as exc:
+        print("[Chubby Checker] Intro error (continuing):", exc, flush=True)
+    try:
+        intro.destroy()
+    except Exception:
+        pass
+    print("[Chubby Checker] Intro done. Opening access gate...", flush=True)
+
+    root = Tk()
+    root.withdraw()
+    root.title("Chubby Checker")
+    try:
+        unlocked = _show_access_gate(root)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        try:
+            messagebox.showerror("Chubby Checker", "Access gate error: " + str(exc))
+        except Exception:
+            pass
+        try:
             root.destroy()
-            sys.exit(0)
-        root.deiconify()
+        except Exception:
+            pass
+        sys.exit(1)
+
+    if not unlocked:
+        print("[Chubby Checker] Access denied / cancelled.", flush=True)
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        sys.exit(0)
+
+    print("[Chubby Checker] Access granted. Opening main window...", flush=True)
+    root.deiconify()
+    try:
         ChubbyCheckerGUI(root)
         root.mainloop()
     except Exception as exc:
@@ -467,10 +524,6 @@ def main():
         traceback.print_exc()
         try:
             messagebox.showerror("Chubby Checker", "Startup error: " + str(exc))
-        except Exception:
-            pass
-        try:
-            root.destroy()
         except Exception:
             pass
         sys.exit(1)
