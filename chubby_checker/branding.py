@@ -27,8 +27,15 @@ _LOGO_CANDIDATES = (
 
 
 def _repo_roots() -> list[Path]:
-    """Possible roots: package parent, cwd, and parents of cwd."""
+    """Possible roots: frozen bundle, package parent, cwd, and parents of cwd."""
+    import sys
+
     roots: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.append(Path(meipass))
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent)
     here = Path(__file__).resolve()
     # chubby_checker/branding.py -> repo root is parents[1]
     roots.append(here.parents[1])

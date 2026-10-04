@@ -12,3 +12,6 @@ output/
 reports/
 *.xlsx
 !examples/**/*.xlsx
+.venv-build/
+build/
+dist/

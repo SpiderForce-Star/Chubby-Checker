@@ -115,3 +115,16 @@ This repository is intended to be transferred to an Ascent Buildings-controlled 
 Ascent Buildings may license and use the software internally under their own policies.
 
 Codename **Chubby Checker** remains in the codebase for continuity.
+
+---
+
+## Desktop program (one file for other PCs)
+
+On your Windows PC, double-click **Build Ascent Chubby.bat** in this folder.
+
+Wait until it says DONE (about 10–20 minutes the first time, internet required).
+It puts **Ascent Chubby.exe** on your Desktop. Copy that one file to each person's desktop.
+They double-click it and enter **Twist1960**. No Python install on their PC.
+Checked reports are saved under that person's Documents folder, in a `reports` folder.
+
+If Windows says it protected the PC, choose **More info**, then **Run anyway**.
