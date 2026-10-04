@@ -122,9 +122,11 @@ Codename **Chubby Checker** remains in the codebase for continuity.
 
 On your Windows PC, double-click **Build Ascent Chubby.bat** in this folder.
 
+If Python 3.12 is not already on that PC, the build downloads and installs Python 3.12.10 for you. You do not have to open python.org.
+
 Wait until it says DONE (about 10–20 minutes the first time, internet required).
 It puts **Ascent Chubby.exe** on your Desktop. Copy that one file to each person's desktop.
-They double-click it and enter **Twist1960**. No Python install on their PC.
+They double-click it and enter **Twist1960**. Python is already inside that file, so their PCs do not install Python.
 Checked reports are saved under that person's Documents folder, in a `reports` folder.
 
 If Windows says it protected the PC, choose **More info**, then **Run anyway**.
