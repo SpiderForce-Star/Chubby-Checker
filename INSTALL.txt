@@ -1,0 +1,19 @@
+Chubby Checker (Ascent Chubby) — install from this zip
+
+1. This file is already inside the unzipped folder. If you are looking at a zip, right-click it and choose Extract All. Opening the zip is not enough.
+2. In this folder, double-click Build Ascent Chubby.bat.
+   Do not run Install-AscentChubby-Ken.bat.
+3. Leave the window open until it says DONE.
+   The first run needs internet and takes about 10–20 minutes.
+   If Python 3.12 is not already on this PC, the script installs it.
+   Do not go to python.org.
+4. When it says DONE, Ascent Chubby.exe is on the Desktop.
+   Python is already inside that file.
+5. Double-click Ascent Chubby.exe.
+   If Windows says it protected your PC, click More info, then Run anyway.
+6. Enter the access code: Twist1960
+7. Checked reports save in Documents\reports.
+
+To give this to someone else, send only Ascent Chubby.exe.
+They save that one file to the Desktop, double-click it, and enter Twist1960.
+They do not need this zip, and they do not install Python.
