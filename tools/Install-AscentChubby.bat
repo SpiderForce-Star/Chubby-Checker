@@ -119,7 +119,7 @@ if exist "%ROOT%\tools\Install-DesktopShortcut.ps1" (
 echo.
 echo ============================================
 echo  Setup complete for %USERNAME%.
- echo.
+echo.
 echo  Daily use:
 echo    1. Double-click Ascent Chubby on the Desktop
 echo    2. Access code: Twist1960
